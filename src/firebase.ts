@@ -8,9 +8,8 @@ const app = initializeApp(firebaseConfig);
 
 // Initialize Firebase Auth & Firestore
 export const auth = getAuth(app);
-export const db = (firebaseConfig as any).firestoreDatabaseId
-  ? getFirestore(app, (firebaseConfig as any).firestoreDatabaseId)
-  : getFirestore(app);
+const databaseId = (firebaseConfig as any).firestoreDatabaseId || "ai-studio-67413ef4-f387-460c-8d88-15d91993e264";
+export const db = getFirestore(app, databaseId);
 
 // Google OAuth Provider setup with scopes
 export const provider = new GoogleAuthProvider();
@@ -18,7 +17,7 @@ provider.addScope("https://www.googleapis.com/auth/calendar");
 provider.addScope("https://www.googleapis.com/auth/gmail.compose");
 
 // Memory cache for Workspace API token of currently signed in user
-let cachedAccessToken: string | null = null;
+let cachedAccessToken: string | null = typeof window !== "undefined" ? localStorage.getItem("g_access_token") : null;
 let isSigningIn = false;
 
 // Initialize auth state listener. Call this on app load.
@@ -31,12 +30,21 @@ export const initAuth = (
       if (cachedAccessToken) {
         if (onAuthSuccess) onAuthSuccess(user, cachedAccessToken);
       } else if (!isSigningIn) {
-        // Token might need a refresh or re-key.
-        // We will maintain the cachedAccessToken in state or trigger sign-in.
-        if (onAuthFailure) onAuthFailure();
+        // Try loading from localStorage
+        const storedToken = typeof window !== "undefined" ? localStorage.getItem("g_access_token") : null;
+        if (storedToken) {
+          cachedAccessToken = storedToken;
+          if (onAuthSuccess) onAuthSuccess(user, storedToken);
+        } else {
+          // Token might need a refresh or re-key.
+          if (onAuthFailure) onAuthFailure();
+        }
       }
     } else {
       cachedAccessToken = null;
+      if (typeof window !== "undefined") {
+        localStorage.removeItem("g_access_token");
+      }
       if (onAuthFailure) onAuthFailure();
     }
   });
@@ -53,6 +61,9 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
     }
 
     cachedAccessToken = credential.accessToken;
+    if (typeof window !== "undefined") {
+      localStorage.setItem("g_access_token", credential.accessToken);
+    }
     return { user: result.user, accessToken: cachedAccessToken };
   } catch (error: any) {
     console.error("Sign in error:", error);
@@ -63,16 +74,25 @@ export const googleSignIn = async (): Promise<{ user: User; accessToken: string 
 };
 
 export const getAccessToken = async (): Promise<string | null> => {
+  if (!cachedAccessToken && typeof window !== "undefined") {
+    cachedAccessToken = localStorage.getItem("g_access_token");
+  }
   return cachedAccessToken;
 };
 
 export const setCachedAccessToken = (token: string) => {
   cachedAccessToken = token;
+  if (typeof window !== "undefined") {
+    localStorage.setItem("g_access_token", token);
+  }
 };
 
 export const logout = async () => {
   await auth.signOut();
   cachedAccessToken = null;
+  if (typeof window !== "undefined") {
+    localStorage.removeItem("g_access_token");
+  }
 };
 
 // Validate Connection to Firestore (MANDATORY per system instruction)
@@ -91,4 +111,6 @@ export async function testConnection() {
   }
 }
 
-testConnection();
+setTimeout(() => {
+  testConnection();
+}, 500);
