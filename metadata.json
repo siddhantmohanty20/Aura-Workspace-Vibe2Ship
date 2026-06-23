@@ -1,0 +1,6 @@
+{
+  "name": "Aura Workspace",
+  "description": "A refined, AI-powered productivity workspace integrating tasks, goals, Google Calendar, and Gmail to prioritize and track your day.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

@@ -1,0 +1,59 @@
+{
+  "entities": {
+    "Task": {
+      "title": "Task",
+      "description": "Represents a productivity task belonging to a user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "deadline": { "type": "string", "format": "date-time" },
+        "estimated_effort": { "type": "integer" },
+        "status": { "type": "string", "enum": ["not_started", "in_progress", "done", "overdue"] },
+        "priority_score": { "type": "number" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "completed_at": { "type": "string" },
+        "goal_id": { "type": "string" }
+      },
+      "required": [
+        "id",
+        "userId",
+        "title",
+        "deadline",
+        "estimated_effort",
+        "status",
+        "priority_score",
+        "created_at"
+      ]
+    },
+    "Goal": {
+      "title": "Goal",
+      "description": "Represents a larger milestone or goal containing multi sub-tasks",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "title": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "userId",
+        "title",
+        "created_at"
+      ]
+    }
+  },
+  "firestore": {
+    "tasks/{taskId}": {
+      "schema": "Task",
+      "description": "User productivity tasks"
+    },
+    "goals/{goalId}": {
+      "schema": "Goal",
+      "description": "User productivity goals"
+    }
+  }
+}
