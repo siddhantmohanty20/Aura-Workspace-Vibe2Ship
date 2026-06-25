@@ -18,8 +18,8 @@ export function CalendarManager({ isAuthenticated, onAuthenticate }: CalendarMan
     setLoading(true);
     setError("");
     try {
-      // Fetch events starting from today (June 23rd, 2026)
-      const nowISO = "2026-06-23T00:14:41-07:00";
+      // Fetch events starting from today
+      const nowISO = new Date().toISOString();
       const items = await fetchCalendarEvents(nowISO);
       setEvents(items);
     } catch (err: any) {

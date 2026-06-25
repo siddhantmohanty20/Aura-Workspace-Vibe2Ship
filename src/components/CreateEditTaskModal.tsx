@@ -57,7 +57,7 @@ export function CreateEditTaskModal({
       setDescription("");
       
       // Default deadline to tomorrow at 9 AM
-      const tomorrow = new Date("2026-06-23T07:23:00Z");
+      const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
       tomorrow.setHours(9, 0, 0, 0);
       try {

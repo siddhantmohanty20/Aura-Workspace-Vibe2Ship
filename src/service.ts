@@ -13,7 +13,7 @@ import {
   setDoc
 } from "firebase/firestore";
 
-const currentTimeStr = "2026-06-23T00:14:41-07:00";
+// Dynamic timestamp computed freshly on demand
 
 /**
  * Fetch all tasks belongs to active logged-in user
@@ -37,8 +37,8 @@ export async function getTasksFromFirestore(): Promise<Task[]> {
     } as Task);
   });
 
-  // Calculate local overdue status on-the-fly relative to current time 2026-06-23
-  const now = new Date(currentTimeStr);
+  // Calculate local overdue status on-the-fly relative to current real-world time
+  const now = new Date();
   let hasModified = false;
 
   const adjustedList = list.map(t => {
@@ -97,7 +97,7 @@ export async function saveTaskToFirestore(taskData: {
   const user = auth.currentUser;
   if (!user) throw new Error("No active authenticated session.");
 
-  const now = new Date(currentTimeStr);
+  const now = new Date();
   const deadlineDate = new Date(taskData.deadline);
   
   // Decide initial status and completion timestamp
@@ -167,7 +167,7 @@ export async function saveGoalToFirestore(title: string): Promise<string> {
   const user = auth.currentUser;
   if (!user) throw new Error("No active authenticated session.");
 
-  const now = new Date(currentTimeStr);
+  const now = new Date();
   const newDocId = `goal_${Date.now()}`;
   
   const newGoalPayload: Omit<Goal, "id"> = {
@@ -209,13 +209,20 @@ export async function deleteGoalFromFirestore(id: string, cascadeTasks: Task[]):
  */
 export async function triggerAiPrioritization(
   allTasks: Task[],
-  allGoals: Goal[]
+  allGoals: Goal[],
+  freeBusy: any[] = [],
+  currentTime: string = new Date().toISOString()
 ): Promise<Task[]> {
   try {
     const res = await fetch("/api/prioritize", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ tasks: allTasks, goals: allGoals }),
+      body: JSON.stringify({ 
+        tasks: allTasks, 
+        goals: allGoals, 
+        freeBusy, 
+        currentTime 
+      }),
     });
 
     if (!res.ok) {
@@ -232,12 +239,17 @@ export async function triggerAiPrioritization(
         const ref = doc(db, "tasks", opt.id);
         const updatePayload: any = {
           priority_score: opt.priority_score,
+          priority_reason: opt.priority_reason || "",
           estimated_effort: opt.estimated_effort,
           status: opt.status,
+          scheduled_start: opt.scheduled_start || null,
+          scheduled_end: opt.scheduled_end || null,
+          scheduling_reason: opt.scheduling_reason || "",
+          scheduling_warning: opt.scheduling_warning || "",
         };
 
         if (opt.status === "done" && !match.completed_at) {
-          updatePayload.completed_at = new Date(currentTimeStr).toISOString();
+          updatePayload.completed_at = new Date(currentTime).toISOString();
         } else if (opt.status !== "done") {
           updatePayload.completed_at = null;
         }

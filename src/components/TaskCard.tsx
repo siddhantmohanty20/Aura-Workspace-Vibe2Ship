@@ -36,7 +36,7 @@ export function TaskCard({
   const [isHovered, setIsHovered] = useState(false);
 
   // Parse deadline Urgency and status
-  const now = new Date("2026-06-23T00:14:41-07:00");
+  const now = new Date();
   const deadlineDate = new Date(task.deadline);
   const diffTime = deadlineDate.getTime() - now.getTime();
   const diffDays = diffTime / (1000 * 60 * 60 * 24);
@@ -235,7 +235,7 @@ export function TaskCard({
             <button
               onClick={() => onDelete(task.id)}
               title="Delete Task"
-              className="p-1.5 rounded-xl text-inherit hover:bg-black/10 dark:hover:bg-white/10 transition-colors"
+              className="p-1.5 rounded-xl text-inherit hover:bg-rose-50 hover:text-rose-600 dark:hover:bg-rose-950/30 dark:hover:text-rose-450 transition-colors"
             >
               <Trash2 className="w-4 h-4 opacity-75" />
             </button>

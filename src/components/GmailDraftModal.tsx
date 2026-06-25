@@ -39,12 +39,6 @@ export function GmailDraftModal({ isOpen, onClose, task }: GmailDraftModalProps)
       return;
     }
 
-    // Mandatory interaction confirmation
-    const confirmed = window.confirm(
-      `Confirm draft creation: Aura will write this draft email directly inside your Gmail account with your permission.\n\nTo: ${to}\nSubject: ${subject}\n\nProceed?`
-    );
-    if (!confirmed) return;
-
     setIsSending(true);
     setError("");
     try {

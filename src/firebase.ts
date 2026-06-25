@@ -8,7 +8,10 @@ const app = initializeApp(firebaseConfig);
 
 // Initialize Firebase Auth & Firestore
 export const auth = getAuth(app);
-const databaseId = (firebaseConfig as any).firestoreDatabaseId || "ai-studio-67413ef4-f387-460c-8d88-15d91993e264";
+let databaseId = (firebaseConfig as any).firestoreDatabaseId;
+if (!databaseId || databaseId === "default" || databaseId === "(default)") {
+  databaseId = "ai-studio-67413ef4-f387-460c-8d88-15d91993e264";
+}
 export const db = getFirestore(app, databaseId);
 
 // Google OAuth Provider setup with scopes

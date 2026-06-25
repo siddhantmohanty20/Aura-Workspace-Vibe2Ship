@@ -68,6 +68,19 @@ export default function App() {
   // Status Alerts
   const [alertMessage, setAlertMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
 
+  // Custom non-blocking confirm dialog state
+  const [confirmState, setConfirmState] = useState<{
+    title: string;
+    message: string;
+    resolve: (value: boolean) => void;
+  } | null>(null);
+
+  const askConfirmation = (title: string, message: string): Promise<boolean> => {
+    return new Promise((resolve) => {
+      setConfirmState({ title, message, resolve });
+    });
+  };
+
   // Detect and set System Theme Preferences for Dark Mode
   useEffect(() => {
     const isDark = window.matchMedia("(prefers-color-scheme: dark)").matches;
@@ -164,7 +177,10 @@ export default function App() {
   };
 
   const handleLogout = async () => {
-    const confirmed = window.confirm("Terminate Aura workspace session?");
+    const confirmed = await askConfirmation(
+      "Sign Out",
+      "Are you sure you want to terminate your active secure Aura workspace session?"
+    );
     if (!confirmed) return;
 
     try {
@@ -210,9 +226,9 @@ export default function App() {
 
     // 3. Task has a deadline. Create or update calendar event
     try {
-      const startTime = new Date(taskData.deadline);
+      const startTime = taskData.scheduled_start ? new Date(taskData.scheduled_start) : new Date(taskData.deadline);
       const durationMin = taskData.estimated_effort > 0 ? taskData.estimated_effort : 60;
-      const endTime = new Date(startTime.getTime() + durationMin * 60 * 1000);
+      const endTime = taskData.scheduled_end ? new Date(taskData.scheduled_end) : new Date(startTime.getTime() + durationMin * 60 * 1000);
 
       const eventData = {
         summary: taskData.title,
@@ -270,10 +286,8 @@ export default function App() {
         triggerAlert("success", taskData.id ? "Task updated." : "Task compiled.");
       }
 
-      // AI auto-calculations if estimated effort was empty or task is completely new
-      if (!taskData.id || taskData.estimated_effort === 0) {
-        handleAiPrioritize(refreshedTasks);
-      }
+      // Automatically trigger the dynamic prioritization and scheduling flow on create/update
+      handleAiPrioritize(refreshedTasks);
     } catch (err) {
       console.error(err);
       triggerAlert("error", "Failed to save task. Schema verification mismatch.");
@@ -308,6 +322,9 @@ export default function App() {
       } else {
         triggerAlert("success", newStatus === "done" ? "Task checked off!" : "Task reactivated.");
       }
+
+      // Trigger re-scheduling and prioritization when completeness changes
+      handleAiPrioritize(refreshed);
     } catch (err) {
       console.error(err);
       triggerAlert("error", "Error mapping complete states in database.");
@@ -316,7 +333,10 @@ export default function App() {
 
   // Delete task
   const handleDeleteTask = async (id: string) => {
-    const confirmed = window.confirm("Are you sure you want to delete this task? This action cannot be undone.");
+    const confirmed = await askConfirmation(
+      "Delete Task",
+      "Are you sure you want to permanently delete this task? This action cannot be undone and will remove it from Google Calendar if synced."
+    );
     if (!confirmed) return;
 
     const taskObj = tasks.find(t => t.id === id);
@@ -359,7 +379,8 @@ export default function App() {
 
   // Delete Goal (cascades tasks that are linked to null)
   const handleDeleteGoal = async (id: string) => {
-    const confirmed = window.confirm(
+    const confirmed = await askConfirmation(
+      "Delete Milestone Goal",
       "Are you sure you want to delete this Goal?\n\nLinked tasks will not be deleted, but they will be unlinked from this Goal. Proceed?"
     );
     if (!confirmed) return;
@@ -376,7 +397,7 @@ export default function App() {
     }
   };
 
-  // Trigger Gemini dynamic prioritizer
+  // Trigger Gemini dynamic prioritizer and scheduler
   const handleAiPrioritize = async (tasksToOptimize = tasks) => {
     if (tasksToOptimize.length === 0) {
       triggerAlert("error", "No tasks available for Gemini calculations.");
@@ -384,12 +405,47 @@ export default function App() {
     }
     setIsCompilingPriority(true);
     try {
-      const updated = await triggerAiPrioritization(tasksToOptimize, goals);
-      setTasks(updated);
-      triggerAlert("success", "AI priorities synchronized and recalibrated.");
+      let freeBusy: any[] = [];
+      if (isAuthenticated) {
+        try {
+          freeBusy = await fetchFreeBusyCurrentWeek();
+        } catch (fbErr) {
+          console.warn("Failed to fetch Google Calendar free/busy schedules:", fbErr);
+        }
+      }
+
+      const currentTimeStr = new Date().toISOString();
+      const updated = await triggerAiPrioritization(tasksToOptimize, goals, freeBusy, currentTimeStr);
+      
+      // Push event creations/updates to Google Calendar so task event IDs stay correctly linked
+      const finalizedTasks: Task[] = [];
+      for (const t of updated) {
+        let taskCopy = { ...t };
+        if (isAuthenticated && taskCopy.status !== "done" && taskCopy.scheduled_start) {
+          const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || tasks.find(item => item.id === taskCopy.id);
+          // Sync to calendar if slot changed, estimated effort changed, or calendar event is missing
+          if (
+            !existingTask || 
+            existingTask.scheduled_start !== taskCopy.scheduled_start || 
+            existingTask.estimated_effort !== taskCopy.estimated_effort ||
+            existingTask.title !== taskCopy.title ||
+            !existingTask.calendarEventId
+          ) {
+            const syncResult = await syncTaskToGoogleCalendar(taskCopy, existingTask);
+            if (syncResult.calendarEventId) {
+              taskCopy.calendarEventId = syncResult.calendarEventId;
+              await saveTaskToFirestore(taskCopy);
+            }
+          }
+        }
+        finalizedTasks.push(taskCopy);
+      }
+
+      setTasks(finalizedTasks);
+      triggerAlert("success", "AI priorities and Google Calendar schedules synchronized.");
     } catch (err) {
-      console.error(err);
-      triggerAlert("error", "AI prioritizer timed out. Offline math applied as fallback.");
+      console.error("AI Prioritization failed:", err);
+      triggerAlert("error", "AI prioritizer offline fallback applied.");
     } finally {
       setIsCompilingPriority(false);
     }
@@ -397,8 +453,9 @@ export default function App() {
 
   // Google Calendar scheduling helper
   const handleSyncToCalendar = async (task: Task) => {
-    const confirmed = window.confirm(
-      `Schedule '${task.title}' on your Google Calendar?\n\nAura will write this event starting at your scheduled deadline:\n${new Date(task.deadline).toLocaleString()}`
+    const confirmed = await askConfirmation(
+      "Schedule Event",
+      `Schedule '${task.title}' on your Google Calendar? Aura will write this event starting at your scheduled deadline: ${new Date(task.deadline).toLocaleString()}`
     );
     if (!confirmed) return;
 
@@ -722,6 +779,66 @@ export default function App() {
                   onAuthenticate={handleLogin}
                 />
 
+                {/* Agent Reasoning Panel */}
+                <div className="rounded-[28px] border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/70 dark:bg-zinc-900/40 p-5 space-y-4 shadow-sm animate-fade-in">
+                  <div className="flex items-center gap-2 border-b border-[#E8E4DF] dark:border-zinc-800 pb-3">
+                    <Sparkles className="w-4 h-4 text-[#D97757] animate-pulse" />
+                    <h3 className="text-sm font-bold font-display tracking-tight text-[#2D2C2A] dark:text-zinc-100">
+                      Agent Reasoning & Scheduling
+                    </h3>
+                  </div>
+
+                  <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
+                    {tasks.filter(t => t.status !== "done").length === 0 ? (
+                      <p className="text-xs text-zinc-400 dark:text-zinc-500 italic">No active tasks to prioritize or schedule.</p>
+                    ) : (
+                      [...tasks]
+                        .filter(t => t.status !== "done")
+                        .sort((a, b) => (b.priority_score || 0) - (a.priority_score || 0))
+                        .map(task => {
+                          const formattedStart = task.scheduled_start 
+                            ? new Date(task.scheduled_start).toLocaleDateString() + ' ' + new Date(task.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
+                            : null;
+                          return (
+                            <div key={task.id} className="p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-150/80 dark:border-zinc-800/60 space-y-2 text-xs">
+                              <div className="flex items-start justify-between gap-2">
+                                <span className="font-bold text-[#2D2C2A] dark:text-zinc-100 truncate max-w-[150px]" title={task.title}>
+                                  {task.title}
+                                </span>
+                                <span className="px-1.5 py-0.5 rounded-md text-[10px] font-mono font-bold bg-[#D4DBCB]/40 dark:bg-[#D4DBCB]/15 text-[#5A644D] dark:text-emerald-400">
+                                  Score: {task.priority_score || '--'}
+                                </span>
+                              </div>
+
+                              {/* Priority Reason */}
+                              <p className="text-zinc-600 dark:text-zinc-400 leading-normal text-[11px]">
+                                <span className="font-semibold text-zinc-800 dark:text-zinc-200">Priority:</span> {task.priority_reason || "Awaiting AI prioritization compile."}
+                              </p>
+
+                              {/* Scheduling Decision */}
+                              <div className="pt-1.5 border-t border-dashed border-zinc-200 dark:border-zinc-800 space-y-1">
+                                <p className="text-zinc-600 dark:text-zinc-400 text-[11px]">
+                                  <span className="font-semibold text-zinc-800 dark:text-zinc-200">Scheduled Slot:</span> {formattedStart ? formattedStart : "Unscheduled"}
+                                </p>
+                                {task.scheduling_reason && (
+                                  <p className="text-zinc-500 dark:text-zinc-500 text-[10px] italic">
+                                    {task.scheduling_reason}
+                                  </p>
+                                )}
+                                {task.scheduling_warning && (
+                                  <div className="mt-1 flex items-start gap-1.5 p-2 rounded-xl bg-rose-50 dark:bg-rose-950/20 text-rose-700 dark:text-rose-400 border border-rose-100 dark:border-rose-900/30 text-[10px] font-medium leading-relaxed">
+                                    <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5 text-rose-600 dark:text-rose-400" />
+                                    <span>{task.scheduling_warning}</span>
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          );
+                        })
+                    )}
+                  </div>
+                </div>
+
                 {/* Milestone Goals */}
                 <div className="rounded-[28px] border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/70 dark:bg-zinc-900/40 p-5 space-y-4 shadow-sm animate-fade-in">
                   <div className="flex items-center gap-2 border-b border-[#E8E4DF] dark:border-zinc-800 pb-3">
@@ -769,6 +886,68 @@ export default function App() {
               }}
               task={emailTaskSource}
             />
+
+            {/* Custom Premium Confirm Dialog Modal */}
+            <AnimatePresence>
+              {confirmState && (
+                <div className="fixed inset-0 z-[100] flex items-center justify-center p-4">
+                  {/* Backdrop */}
+                  <motion.div
+                    initial={{ opacity: 0 }}
+                    animate={{ opacity: 1 }}
+                    exit={{ opacity: 0 }}
+                    onClick={() => {
+                      confirmState.resolve(false);
+                      setConfirmState(null);
+                    }}
+                    className="absolute inset-0 bg-neutral-950/75 backdrop-blur-[3px]"
+                  />
+
+                  {/* Modal Panel */}
+                  <motion.div
+                    initial={{ opacity: 0, scale: 0.95, y: 15 }}
+                    animate={{ opacity: 1, scale: 1, y: 0 }}
+                    exit={{ opacity: 0, scale: 0.95, y: 15 }}
+                    className="relative w-full max-w-sm bg-[#F7F5F2] dark:bg-zinc-900 border border-[#E8E4DF] dark:border-zinc-800 rounded-2xl shadow-2xl p-5 z-10 text-neutral-800 dark:text-neutral-100"
+                  >
+                    <div className="flex items-start gap-3">
+                      <div className="p-2.5 bg-[#D97757]/10 dark:bg-[#D97757]/20 rounded-xl flex-shrink-0 text-[#D97757]">
+                        <AlertCircle className="w-5 h-5" />
+                      </div>
+                      <div className="flex-1 space-y-1">
+                        <h3 className="text-sm font-bold font-serif text-[#2D2C2A] dark:text-zinc-100">
+                          {confirmState.title}
+                        </h3>
+                        <p className="text-xs text-[#5C5752] dark:text-zinc-400 leading-relaxed font-sans">
+                          {confirmState.message}
+                        </p>
+                      </div>
+                    </div>
+
+                    <div className="mt-5 flex items-center justify-end gap-2.5">
+                      <button
+                        onClick={() => {
+                          confirmState.resolve(false);
+                          setConfirmState(null);
+                        }}
+                        className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-zinc-500 dark:text-zinc-400 hover:text-zinc-750 dark:hover:text-zinc-200 hover:bg-black/5 dark:hover:bg-white/5 transition-all cursor-pointer"
+                      >
+                        Cancel
+                      </button>
+                      <button
+                        onClick={() => {
+                          confirmState.resolve(true);
+                          setConfirmState(null);
+                        }}
+                        className="px-4.5 py-2 rounded-xl text-xs font-bold text-white bg-[#D97757] hover:bg-[#D97757]/95 shadow-sm active:scale-95 transition-all cursor-pointer font-sans"
+                      >
+                        Confirm Action
+                      </button>
+                    </div>
+                  </motion.div>
+                </div>
+              )}
+            </AnimatePresence>
 
           </motion.div>
         )}

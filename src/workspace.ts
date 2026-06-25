@@ -213,7 +213,7 @@ export async function queryFreeBusy(timeMinISOString: string, timeMaxISOString: 
  * Assumes a week starting Sunday and ending Saturday.
  */
 export async function fetchFreeBusyCurrentWeek(): Promise<any[]> {
-  const now = new Date("2026-06-23T06:12:57-07:00");
+  const now = new Date();
   const startOfWeek = new Date(now);
   const day = startOfWeek.getDay(); // 0 is Sunday, 1 is Monday ...
   startOfWeek.setDate(startOfWeek.getDate() - day);

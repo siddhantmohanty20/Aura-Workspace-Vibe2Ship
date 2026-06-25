@@ -11,6 +11,13 @@ export interface Task {
   completed_at: string | null;
   goal_id: string | null;
   calendarEventId?: string | null;
+
+  // New AI Prioritization & Scheduling fields
+  priority_reason?: string;
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
+  scheduling_reason?: string;
+  scheduling_warning?: string;
 }
 
 export interface Goal {
