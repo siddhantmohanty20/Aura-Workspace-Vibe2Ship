@@ -8,12 +8,17 @@ service cloud.firestore {
 
     match /tasks/{taskId} {
       allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create, update: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid) && request.resource.data.userId == request.auth.uid;
+      allow create, update: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid) && (request.resource == null || request.resource.data.userId == request.auth.uid);
     }
 
     match /goals/{goalId} {
       allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
-      allow create, update: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid) && request.resource.data.userId == request.auth.uid;
+      allow create, update: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid) && (request.resource == null || request.resource.data.userId == request.auth.uid);
+    }
+
+    match /notes/{noteId} {
+      allow read, delete: if isAuthenticated() && resource.data.userId == request.auth.uid;
+      allow create, update: if isAuthenticated() && (resource == null || resource.data.userId == request.auth.uid) && (request.resource == null || request.resource.data.userId == request.auth.uid);
     }
   }
 }

@@ -1,5 +1,5 @@
 import { db, auth } from "./firebase";
-import { Task, Goal } from "./types";
+import { Task, Goal, Note } from "./types";
 import { 
   collection, 
   addDoc, 
@@ -13,6 +13,53 @@ import {
   setDoc
 } from "firebase/firestore";
 
+enum OperationType {
+  CREATE = 'create',
+  UPDATE = 'update',
+  DELETE = 'delete',
+  LIST = 'list',
+  GET = 'get',
+  WRITE = 'write',
+}
+
+interface FirestoreErrorInfo {
+  error: string;
+  operationType: OperationType;
+  path: string | null;
+  authInfo: {
+    userId?: string | null;
+    email?: string | null;
+    emailVerified?: boolean | null;
+    isAnonymous?: boolean | null;
+    tenantId?: string | null;
+    providerInfo?: {
+      providerId?: string | null;
+      email?: string | null;
+    }[];
+  }
+}
+
+function handleFirestoreError(error: unknown, operationType: OperationType, path: string | null) {
+  const errInfo: FirestoreErrorInfo = {
+    error: error instanceof Error ? error.message : String(error),
+    authInfo: {
+      userId: auth.currentUser?.uid,
+      email: auth.currentUser?.email,
+      emailVerified: auth.currentUser?.emailVerified,
+      isAnonymous: auth.currentUser?.isAnonymous,
+      tenantId: auth.currentUser?.tenantId,
+      providerInfo: auth.currentUser?.providerData?.map(provider => ({
+        providerId: provider.providerId,
+        email: provider.email,
+      })) || []
+    },
+    operationType,
+    path
+  };
+  console.error('Firestore Error: ', JSON.stringify(errInfo));
+  throw new Error(JSON.stringify(errInfo));
+}
+
 // Dynamic timestamp computed freshly on demand
 
 /**
@@ -22,37 +69,48 @@ export async function getTasksFromFirestore(): Promise<Task[]> {
   const user = auth.currentUser;
   if (!user) return [];
 
-  const q = query(
-    collection(db, "tasks"),
-    where("userId", "==", user.uid)
-  );
+  const path = "tasks";
+  try {
+    const q = query(
+      collection(db, path),
+      where("userId", "==", user.uid)
+    );
 
-  const snapshot = await getDocs(q);
-  const list: Task[] = [];
-  snapshot.forEach((doc) => {
-    const data = doc.data();
-    list.push({
-      id: doc.id,
-      ...data,
-    } as Task);
-  });
+    const snapshot = await getDocs(q);
+    const list: Task[] = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      list.push({
+        id: doc.id,
+        ...data,
+      } as Task);
+    });
 
-  // Calculate local overdue status on-the-fly relative to current real-world time
-  const now = new Date();
-  let hasModified = false;
+    // Calculate local overdue status on-the-fly relative to current real-world time
+    const now = new Date();
 
-  const adjustedList = list.map(t => {
-    if (t.status !== "done") {
-      const deadlineDate = new Date(t.deadline);
-      if (deadlineDate.getTime() < now.getTime() && t.status !== "overdue") {
-        t.status = "overdue";
-        hasModified = true;
+    const adjustedList = list.map(t => {
+      if (t.status !== "done") {
+        if (t.scheduled_end) {
+          const end = new Date(t.scheduled_end);
+          if (now.getTime() >= end.getTime() && t.status !== "overdue") {
+            t.status = "overdue";
+          }
+        } else {
+          const deadlineDate = new Date(t.deadline);
+          if (deadlineDate.getTime() < now.getTime() && t.status !== "overdue") {
+            t.status = "overdue";
+          }
+        }
       }
-    }
-    return t;
-  });
+      return t;
+    });
 
-  return adjustedList;
+    return adjustedList;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+    return [];
+  }
 }
 
 /**
@@ -62,22 +120,28 @@ export async function getGoalsFromFirestore(): Promise<Goal[]> {
   const user = auth.currentUser;
   if (!user) return [];
 
-  const q = query(
-    collection(db, "goals"),
-    where("userId", "==", user.uid)
-  );
+  const path = "goals";
+  try {
+    const q = query(
+      collection(db, path),
+      where("userId", "==", user.uid)
+    );
 
-  const snapshot = await getDocs(q);
-  const list: Goal[] = [];
-  snapshot.forEach((doc) => {
-    const data = doc.data();
-    list.push({
-      id: doc.id,
-      ...data,
-    } as Goal);
-  });
+    const snapshot = await getDocs(q);
+    const list: Goal[] = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      list.push({
+        id: doc.id,
+        ...data,
+      } as Goal);
+    });
 
-  return list;
+    return list;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+    return [];
+  }
 }
 
 /**
@@ -93,6 +157,15 @@ export async function saveTaskToFirestore(taskData: {
   status?: "not_started" | "in_progress" | "done" | "overdue";
   priority_score?: number;
   calendarEventId?: string | null;
+  priority_reason?: string;
+  scheduled_start?: string | null;
+  scheduled_end?: string | null;
+  scheduling_reason?: string;
+  scheduling_warning?: string;
+  initial_deadline?: string | null;
+  replanned?: boolean | null;
+  recurrence?: 'none' | 'daily' | 'weekly';
+  completions?: string[];
 }): Promise<string> {
   const user = auth.currentUser;
   if (!user) throw new Error("No active authenticated session.");
@@ -110,53 +183,93 @@ export async function saveTaskToFirestore(taskData: {
     determinedStatus = "overdue";
   }
 
-  // Check if updating or creating
-  if (taskData.id) {
-    const taskRef = doc(db, "tasks", taskData.id);
-    
-    // Clean fields update
-    const updatePayload: any = {
-      title: taskData.title,
-      description: taskData.description,
-      deadline: taskData.deadline,
-      estimated_effort: taskData.estimated_effort,
-      goal_id: taskData.goal_id,
-      status: determinedStatus,
-    };
+  const path = "tasks";
+  try {
+    // Check if updating or creating
+    if (taskData.id) {
+      const taskRef = doc(db, path, taskData.id);
+      
+      // Clean fields update
+      const updatePayload: any = {
+        title: taskData.title,
+        description: taskData.description,
+        deadline: taskData.deadline,
+        estimated_effort: taskData.estimated_effort,
+        goal_id: taskData.goal_id,
+        status: determinedStatus,
+        recurrence: taskData.recurrence || "none",
+      };
 
-    if (taskData.priority_score !== undefined) {
-      updatePayload.priority_score = taskData.priority_score;
-    }
-    if (taskData.calendarEventId !== undefined) {
-      updatePayload.calendarEventId = taskData.calendarEventId;
-    }
-    if (determinedStatus === "done") {
-      updatePayload.completed_at = completedAtVal;
+      if (taskData.priority_score !== undefined) {
+        updatePayload.priority_score = taskData.priority_score;
+      }
+      if (taskData.calendarEventId !== undefined) {
+        updatePayload.calendarEventId = taskData.calendarEventId;
+      }
+      if (taskData.priority_reason !== undefined) {
+        updatePayload.priority_reason = taskData.priority_reason;
+      }
+      if (taskData.scheduled_start !== undefined) {
+        updatePayload.scheduled_start = taskData.scheduled_start;
+      }
+      if (taskData.scheduled_end !== undefined) {
+        updatePayload.scheduled_end = taskData.scheduled_end;
+      }
+      if (taskData.scheduling_reason !== undefined) {
+        updatePayload.scheduling_reason = taskData.scheduling_reason;
+      }
+      if (taskData.scheduling_warning !== undefined) {
+        updatePayload.scheduling_warning = taskData.scheduling_warning;
+      }
+      if (taskData.initial_deadline !== undefined) {
+        updatePayload.initial_deadline = taskData.initial_deadline;
+      }
+      if (taskData.replanned !== undefined) {
+        updatePayload.replanned = taskData.replanned;
+      }
+      if (taskData.completions !== undefined) {
+        updatePayload.completions = taskData.completions;
+      }
+      if (determinedStatus === "done") {
+        updatePayload.completed_at = completedAtVal;
+      } else {
+        updatePayload.completed_at = null;
+      }
+
+      await updateDoc(taskRef, updatePayload);
+      return taskData.id;
     } else {
-      updatePayload.completed_at = null;
+      // Creating fresh task
+      const newDocId = `task_${Date.now()}`;
+      const newTaskPayload: Omit<Task, "id"> = {
+        userId: user.uid,
+        title: taskData.title,
+        description: taskData.description,
+        deadline: taskData.deadline,
+        estimated_effort: taskData.estimated_effort,
+        status: determinedStatus,
+        priority_score: taskData.priority_score || 30, // base starter metric
+        created_at: now.toISOString(),
+        completed_at: completedAtVal,
+        goal_id: taskData.goal_id,
+        calendarEventId: taskData.calendarEventId || null,
+        priority_reason: taskData.priority_reason || "",
+        scheduled_start: taskData.scheduled_start || null,
+        scheduled_end: taskData.scheduled_end || null,
+        scheduling_reason: taskData.scheduling_reason || "",
+        scheduling_warning: taskData.scheduling_warning || "",
+        initial_deadline: taskData.initial_deadline || taskData.deadline,
+        replanned: taskData.replanned || null,
+        recurrence: taskData.recurrence || "none",
+        completions: taskData.completions || [],
+      };
+
+      await setDoc(doc(db, path, newDocId), newTaskPayload);
+      return newDocId;
     }
-
-    await updateDoc(taskRef, updatePayload);
-    return taskData.id;
-  } else {
-    // Creating fresh task
-    const newDocId = `task_${Date.now()}`;
-    const newTaskPayload: Omit<Task, "id"> = {
-      userId: user.uid,
-      title: taskData.title,
-      description: taskData.description,
-      deadline: taskData.deadline,
-      estimated_effort: taskData.estimated_effort,
-      status: determinedStatus,
-      priority_score: taskData.priority_score || 30, // base starter metric
-      created_at: now.toISOString(),
-      completed_at: completedAtVal,
-      goal_id: taskData.goal_id,
-      calendarEventId: taskData.calendarEventId || null,
-    };
-
-    await setDoc(doc(db, "tasks", newDocId), newTaskPayload);
-    return newDocId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+    throw error;
   }
 }
 
@@ -176,30 +289,129 @@ export async function saveGoalToFirestore(title: string): Promise<string> {
     created_at: now.toISOString(),
   };
 
-  await setDoc(doc(db, "goals", newDocId), newGoalPayload);
-  return newDocId;
+  const path = "goals";
+  try {
+    await setDoc(doc(db, path, newDocId), newGoalPayload);
+    return newDocId;
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+    throw error;
+  }
 }
 
 /**
  * Delete a Task from Firestore
  */
 export async function deleteTaskFromFirestore(id: string): Promise<void> {
-  await deleteDoc(doc(db, "tasks", id));
+  const path = "tasks";
+  try {
+    await deleteDoc(doc(db, path, id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
 }
 
 /**
  * Delete a Goal from Firestore
- * Also unlink any tasks dependent on this goal
+ * Also delete any tasks dependent on this goal
  */
 export async function deleteGoalFromFirestore(id: string, cascadeTasks: Task[]): Promise<void> {
-  // 1. Delete Goal document
-  await deleteDoc(doc(db, "goals", id));
+  const path = "goals";
+  try {
+    // 1. Delete Goal document
+    await deleteDoc(doc(db, path, id));
 
-  // 2. Unlink any tasks currently referencing this goal
-  const linked = cascadeTasks.filter(t => t.goal_id === id);
-  for (const t of linked) {
-    const ref = doc(db, "tasks", t.id);
-    await updateDoc(ref, { goal_id: null });
+    // 2. Delete any tasks currently referencing this goal
+    const linked = cascadeTasks.filter(t => t.goal_id === id);
+    for (const t of linked) {
+      const ref = doc(db, "tasks", t.id);
+      await deleteDoc(ref);
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
+  }
+}
+
+/**
+ * Fetch all notes belonging to the active logged-in user
+ */
+export async function getNotesFromFirestore(): Promise<Note[]> {
+  const user = auth.currentUser;
+  if (!user) return [];
+
+  const path = "notes";
+  try {
+    const q = query(
+      collection(db, path),
+      where("userId", "==", user.uid)
+    );
+
+    const snapshot = await getDocs(q);
+    const list: Note[] = [];
+    snapshot.forEach((doc) => {
+      const data = doc.data();
+      list.push({
+        id: doc.id,
+        ...data,
+      } as Note);
+    });
+
+    // Client-side sort to avoid needing an index immediately
+    return list.sort((a, b) => new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime());
+  } catch (error) {
+    handleFirestoreError(error, OperationType.GET, path);
+    return [];
+  }
+}
+
+/**
+ * Create or Update a note on Firestore
+ */
+export async function saveNoteToFirestore(noteData: {
+  id?: string;
+  content: string;
+}): Promise<string> {
+  const user = auth.currentUser;
+  if (!user) throw new Error("No active authenticated session.");
+
+  const now = new Date();
+  const path = "notes";
+
+  try {
+    if (noteData.id) {
+      const noteRef = doc(db, path, noteData.id);
+      const updatePayload = {
+        content: noteData.content,
+        updated_at: now.toISOString(),
+      };
+      await updateDoc(noteRef, updatePayload);
+      return noteData.id;
+    } else {
+      const newDocId = `note_${Date.now()}`;
+      const newNotePayload: Omit<Note, "id"> = {
+        userId: user.uid,
+        content: noteData.content,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      };
+      await setDoc(doc(db, path, newDocId), newNotePayload);
+      return newDocId;
+    }
+  } catch (error) {
+    handleFirestoreError(error, OperationType.WRITE, path);
+    throw error;
+  }
+}
+
+/**
+ * Delete a Note from Firestore
+ */
+export async function deleteNoteFromFirestore(id: string): Promise<void> {
+  const path = "notes";
+  try {
+    await deleteDoc(doc(db, path, id));
+  } catch (error) {
+    handleFirestoreError(error, OperationType.DELETE, path);
   }
 }
 

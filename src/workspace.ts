@@ -26,7 +26,7 @@ export async function fetchCalendarEvents(timeMinISOString: string): Promise<any
 
   const url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${encodeURIComponent(
     timeMinISOString
-  )}&singleEvents=true&orderBy=startTime&maxResults=15`;
+  )}&singleEvents=true&orderBy=startTime&maxResults=100`;
 
   const response = await fetch(url, {
     method: "GET",

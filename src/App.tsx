@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from "react";
-import { Task, Goal } from "./types";
+import { Task, Goal, Note } from "./types";
 import { 
   initAuth, 
   googleSignIn, 
@@ -13,13 +13,17 @@ import {
   saveGoalToFirestore,
   deleteTaskFromFirestore,
   deleteGoalFromFirestore,
-  triggerAiPrioritization
+  triggerAiPrioritization,
+  getNotesFromFirestore,
+  saveNoteToFirestore,
+  deleteNoteFromFirestore
 } from "./service";
 import { 
   createCalendarEvent, 
   updateCalendarEvent, 
   deleteCalendarEvent, 
-  fetchFreeBusyCurrentWeek 
+  fetchFreeBusyCurrentWeek,
+  createGmailDraft
 } from "./workspace";
 import { TaskCard } from "./components/TaskCard";
 import { CreateEditTaskModal } from "./components/CreateEditTaskModal";
@@ -27,6 +31,8 @@ import { GoalManager } from "./components/GoalManager";
 import { CalendarManager } from "./components/CalendarManager";
 import { GmailDraftModal } from "./components/GmailDraftModal";
 import { AuraAssistant } from "./components/AuraAssistant";
+import { NotesManager } from "./components/NotesManager";
+import { HabitTracker } from "./components/HabitTracker";
 import { 
   Plus, 
   Sparkles, 
@@ -52,11 +58,13 @@ export default function App() {
   // Dynamic Workspace States
   const [tasks, setTasks] = useState<Task[]>([]);
   const [goals, setGoals] = useState<Goal[]>([]);
+  const [notes, setNotes] = useState<Note[]>([]);
   const [loadingData, setLoadingData] = useState(false);
   const [isCompilingPriority, setIsCompilingPriority] = useState(false);
 
   // Filters
-  const [activeFilter, setActiveFilter] = useState<"active" | "done" | "overdue">("active");
+  const [activeFilter, setActiveFilter] = useState<"active" | "done" | "overdue" | "habits">("active");
+  const [draftConfirmations, setDraftConfirmations] = useState<{taskId: string, draftId: string, title: string, gmailLink: string}[]>([]);
 
   // Modals / Panels toggles
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
@@ -133,17 +141,40 @@ export default function App() {
 
   const loadWorkspaceData = async () => {
     setLoadingData(true);
+    let fetchedTasks: Task[] = [];
+    let fetchedGoals: Goal[] = [];
+    let fetchedNotes: Note[] = [];
+    let hasError = false;
+
     try {
-      const fetchedTasks = await getTasksFromFirestore();
-      const fetchedGoals = await getGoalsFromFirestore();
-      setTasks(fetchedTasks);
-      setGoals(fetchedGoals);
+      fetchedTasks = await getTasksFromFirestore();
     } catch (err) {
-      console.error(err);
-      triggerAlert("error", "Error loading tasks from cloud storage.");
-    } finally {
-      setLoadingData(false);
+      console.error("Error loading tasks:", err);
+      hasError = true;
     }
+
+    try {
+      fetchedGoals = await getGoalsFromFirestore();
+    } catch (err) {
+      console.error("Error loading goals:", err);
+      hasError = true;
+    }
+
+    try {
+      fetchedNotes = await getNotesFromFirestore();
+    } catch (err) {
+      console.error("Error loading notes:", err);
+      // We don't mark notes error as fatal to workspace tasks/goals
+    }
+
+    setTasks(fetchedTasks);
+    setGoals(fetchedGoals);
+    setNotes(fetchedNotes);
+
+    if (hasError) {
+      triggerAlert("error", "Error loading some workspace data from cloud storage.");
+    }
+    setLoadingData(false);
   };
 
   const triggerAlert = (type: "success" | "error", text: string) => {
@@ -265,9 +296,27 @@ export default function App() {
       let finalData = { ...taskData };
       const existingTaskObj = tasks.find(t => t.id === taskData.id);
       
+      if (existingTaskObj) {
+        if (existingTaskObj.deadline !== taskData.deadline) {
+          finalData.initial_deadline = existingTaskObj.initial_deadline || existingTaskObj.deadline;
+          finalData.scheduled_start = null;
+          finalData.scheduled_end = null;
+        } else {
+          finalData.initial_deadline = existingTaskObj.initial_deadline || existingTaskObj.deadline;
+          finalData.scheduled_start = existingTaskObj.scheduled_start || null;
+          finalData.scheduled_end = existingTaskObj.scheduled_end || null;
+        }
+        finalData.calendarEventId = existingTaskObj.calendarEventId || null;
+      } else {
+        finalData.initial_deadline = taskData.deadline;
+        finalData.scheduled_start = null;
+        finalData.scheduled_end = null;
+        finalData.calendarEventId = null;
+      }
+
       let calendarWarning = "";
       if (isAuthenticated) {
-        const syncResult = await syncTaskToGoogleCalendar(taskData, existingTaskObj);
+        const syncResult = await syncTaskToGoogleCalendar(finalData, existingTaskObj);
         finalData.calendarEventId = syncResult.calendarEventId;
         if (syncResult.warning) {
           calendarWarning = syncResult.warning;
@@ -291,6 +340,46 @@ export default function App() {
     } catch (err) {
       console.error(err);
       triggerAlert("error", "Failed to save task. Schema verification mismatch.");
+    }
+  };
+
+  const handleLogHabitCompletion = async (task: Task) => {
+    try {
+      const nowStr = new Date().toISOString();
+      const currentCompletions = task.completions || [];
+      const updatedCompletions = [...currentCompletions, nowStr];
+      
+      const updatedFields: Task = {
+        ...task,
+        completions: updatedCompletions,
+        status: "done" as const,
+        completed_at: nowStr,
+      };
+
+      let calendarWarning = "";
+      if (isAuthenticated) {
+        const syncResult = await syncTaskToGoogleCalendar(updatedFields, task);
+        updatedFields.calendarEventId = syncResult.calendarEventId;
+        if (syncResult.warning) {
+          calendarWarning = syncResult.warning;
+        }
+      }
+
+      await saveTaskToFirestore(updatedFields);
+
+      const refreshed = await getTasksFromFirestore();
+      setTasks(refreshed);
+
+      if (calendarWarning) {
+        triggerAlert("error", calendarWarning);
+      } else {
+        triggerAlert("success", `Habit completion logged for "${task.title}"!`);
+      }
+
+      handleAiPrioritize(refreshed);
+    } catch (err) {
+      console.error(err);
+      triggerAlert("error", "Error logging habit completion.");
     }
   };
 
@@ -381,9 +470,25 @@ export default function App() {
   const handleDeleteGoal = async (id: string) => {
     const confirmed = await askConfirmation(
       "Delete Milestone Goal",
-      "Are you sure you want to delete this Goal?\n\nLinked tasks will not be deleted, but they will be unlinked from this Goal. Proceed?"
+      "Are you sure you want to delete this Goal?\n\nThis will also permanently delete all associated subtasks from your database and Google Calendar. Proceed?"
     );
     if (!confirmed) return;
+
+    let calendarWarning = "";
+    const linkedTasks = tasks.filter(t => t.goal_id === id);
+
+    if (isAuthenticated) {
+      for (const t of linkedTasks) {
+        if (t.calendarEventId) {
+          try {
+            await deleteCalendarEvent(t.calendarEventId);
+          } catch (err: any) {
+            console.warn(`Failed to delete Calendar event for subtask "${t.title}":`, err);
+            calendarWarning = "Goal deleted, but some Google Calendar events could not be removed.";
+          }
+        }
+      }
+    }
 
     try {
       await deleteGoalFromFirestore(id, tasks);
@@ -391,11 +496,225 @@ export default function App() {
       const refreshedTasks = await getTasksFromFirestore();
       setGoals(refreshedGoals);
       setTasks(refreshedTasks);
-      triggerAlert("success", "Goal deleted and dependent tasks unlinked.");
+      
+      if (calendarWarning) {
+        triggerAlert("error", calendarWarning);
+      } else {
+        triggerAlert("success", "Goal and associated subtasks deleted successfully.");
+      }
     } catch {
       triggerAlert("error", "Error compiling drop goal instruction.");
     }
   };
+
+  // Goal decomposition: let the user break down a high-level goal using AI
+  const handleDecomposeGoal = async (title: string) => {
+    try {
+      // 1. Create the Goal record first in Firestore
+      const goalId = await saveGoalToFirestore(title);
+      
+      // 2. Fetch decomp tasks from server
+      const response = await fetch("/api/extract-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: title,
+          type: "goal",
+          currentTime: new Date().toISOString()
+        })
+      });
+
+      if (!response.ok) {
+        throw new Error("Goal decomposition failed");
+      }
+
+      const data = await response.json();
+      const extractedTasks = data.tasks || [];
+
+      // 3. Create Task records for each sub-task linked to this Goal
+      for (const t of extractedTasks) {
+        let taskFields = {
+          title: t.title,
+          description: t.description,
+          deadline: t.deadline,
+          estimated_effort: t.estimated_effort,
+          goal_id: goalId,
+          status: "not_started" as const,
+          calendarEventId: null as string | null
+        };
+
+        if (isAuthenticated) {
+          try {
+            const syncResult = await syncTaskToGoogleCalendar(taskFields);
+            taskFields.calendarEventId = syncResult.calendarEventId;
+          } catch (syncErr) {
+            console.warn("Failed to sync sub-task to Google Calendar during decomposition:", syncErr);
+          }
+        }
+
+        await saveTaskToFirestore(taskFields);
+      }
+
+      // 4. Reload goals and tasks
+      const refreshedGoals = await getGoalsFromFirestore();
+      setGoals(refreshedGoals);
+      const refreshedTasks = await getTasksFromFirestore();
+      setTasks(refreshedTasks);
+
+      triggerAlert("success", `AI broke down goal into ${extractedTasks.length} tasks! Scheduling with Aura...`);
+
+      // 5. Instantly prioritize and schedule the newly created tasks
+      await handleAiPrioritize(refreshedTasks);
+
+    } catch (err) {
+      console.error("Failed to decompose goal:", err);
+      triggerAlert("error", "Error decomposing goal with AI.");
+    }
+  };
+
+  // Note CRUD & AI Extraction Handlers
+  const handleSaveNote = async (content: string, id?: string): Promise<string> => {
+    try {
+      const savedId = await saveNoteToFirestore({ content, id });
+      const refreshed = await getNotesFromFirestore();
+      setNotes(refreshed);
+      return savedId;
+    } catch (err) {
+      console.error(err);
+      triggerAlert("error", "Error saving note to workspace.");
+      return "";
+    }
+  };
+
+  const handleDeleteNote = async (id: string) => {
+    const confirmed = await askConfirmation(
+      "Delete Note",
+      "Are you sure you want to delete this Note from your workspace?"
+    );
+    if (!confirmed) return;
+
+    try {
+      await deleteNoteFromFirestore(id);
+      const refreshed = await getNotesFromFirestore();
+      setNotes(refreshed);
+      triggerAlert("success", "Note deleted successfully.");
+    } catch (err) {
+      console.error(err);
+      triggerAlert("error", "Error deleting note.");
+    }
+  };
+
+  const handleTasksExtracted = async (extractedTasks: any[]) => {
+    try {
+      for (const t of extractedTasks) {
+        let taskFields = {
+          title: t.title,
+          description: t.description,
+          deadline: t.deadline,
+          estimated_effort: t.estimated_effort,
+          goal_id: null,
+          status: "not_started" as const,
+          calendarEventId: null as string | null
+        };
+
+        if (isAuthenticated) {
+          try {
+            const syncResult = await syncTaskToGoogleCalendar(taskFields);
+            taskFields.calendarEventId = syncResult.calendarEventId;
+          } catch (syncErr) {
+            console.warn("Failed to sync extracted task to Google Calendar:", syncErr);
+          }
+        }
+
+        await saveTaskToFirestore(taskFields);
+      }
+      const refreshedTasks = await getTasksFromFirestore();
+      setTasks(refreshedTasks);
+      const refreshedGoals = await getGoalsFromFirestore();
+      setGoals(refreshedGoals);
+      
+      triggerAlert("success", `Extracted ${extractedTasks.length} tasks! Rescheduling workspace...`);
+      await handleAiPrioritize(refreshedTasks);
+    } catch (err) {
+      console.error(err);
+      triggerAlert("error", "Error scheduling extracted tasks.");
+    }
+  };
+
+  // Overdue check and automatic silent re-planning loop
+  useEffect(() => {
+    if (!isAuthenticated || tasks.length === 0 || isCompilingPriority) return;
+
+    const hasEmailIntent = (title: string, desc: string) => {
+      const text = (title + " " + (desc || "")).toLowerCase();
+      return ["email", "follow up", "follow-up", "send", "reply to"].some(keyword => text.includes(keyword));
+    };
+
+    const checkAndReplanOverdueTasks = async () => {
+      const now = new Date();
+      let hasOverdueToReplan = false;
+      const overdueTasksForDraft: Task[] = [];
+      const tasksWithReplannedFlag = tasks.map(t => {
+        if (t.status !== "done" && t.scheduled_end) {
+          const endTime = new Date(t.scheduled_end);
+          if (now.getTime() > endTime.getTime() && t.status !== "overdue") {
+            hasOverdueToReplan = true;
+            overdueTasksForDraft.push(t);
+            return {
+              ...t,
+              status: "overdue" as const,
+              replanned: true,
+              initial_deadline: t.initial_deadline || t.deadline
+            };
+          }
+        }
+        return t;
+      });
+
+      if (hasOverdueToReplan) {
+        console.log("Aura Workspace Autocure: Detected missed schedule blocks. Triggering silent re-planning...");
+        triggerAlert("error", "Aura: Missed schedule blocks detected. Auto-healing calendar...");
+        
+        for (const overdueTask of overdueTasksForDraft) {
+          if (hasEmailIntent(overdueTask.title, overdueTask.description || "")) {
+            try {
+              const subject = `Delay Update: ${overdueTask.title}`;
+              const bodyText = `Hi,\n\nI wanted to update you regarding "${overdueTask.title}". There has been a slight delay on my end, but I am rescheduling this and will follow up with next steps shortly.\n\nBest regards,\n[Sent via Aura AI Assistant]`;
+              
+              const draftResult = await createGmailDraft("recipient@example.com", subject, bodyText);
+              if (draftResult && draftResult.id) {
+                setDraftConfirmations(prev => [
+                  ...prev,
+                  {
+                    taskId: overdueTask.id,
+                    draftId: draftResult.id,
+                    title: overdueTask.title,
+                    gmailLink: "https://mail.google.com/mail/u/0/#drafts"
+                  }
+                ]);
+                triggerAlert("success", `Gmail draft created for: "${overdueTask.title}"`);
+              }
+            } catch (draftErr) {
+              console.warn("Failed to create Gmail draft for overdue task:", draftErr);
+              triggerAlert("error", `Failed to create Gmail draft for "${overdueTask.title}". Skipping draft.`);
+            }
+          }
+        }
+
+        // Trigger silent prioritization/scheduling with the marked tasks!
+        await handleAiPrioritize(tasksWithReplannedFlag);
+      }
+    };
+
+    // Run initially with a small delay, then periodically
+    const initialTimeout = setTimeout(checkAndReplanOverdueTasks, 8000);
+    const interval = setInterval(checkAndReplanOverdueTasks, 60000);
+
+    return () => {
+      clearTimeout(initialTimeout);
+      clearInterval(interval);
+    };
+  }, [isAuthenticated, tasks, isCompilingPriority]);
 
   // Trigger Gemini dynamic prioritizer and scheduler
   const handleAiPrioritize = async (tasksToOptimize = tasks) => {
@@ -421,8 +740,25 @@ export default function App() {
       const finalizedTasks: Task[] = [];
       for (const t of updated) {
         let taskCopy = { ...t };
+        const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || tasks.find(item => item.id === taskCopy.id);
+        
+        if (existingTask) {
+          taskCopy.initial_deadline = existingTask.initial_deadline || existingTask.deadline;
+          if (existingTask.calendarEventId && !taskCopy.calendarEventId) {
+            taskCopy.calendarEventId = existingTask.calendarEventId;
+          }
+          if (existingTask.replanned) {
+            taskCopy.replanned = true;
+          }
+        } else {
+          taskCopy.initial_deadline = t.deadline;
+        }
+
+        if (taskCopy.scheduled_end) {
+          taskCopy.deadline = taskCopy.scheduled_end;
+        }
+
         if (isAuthenticated && taskCopy.status !== "done" && taskCopy.scheduled_start) {
-          const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || tasks.find(item => item.id === taskCopy.id);
           // Sync to calendar if slot changed, estimated effort changed, or calendar event is missing
           if (
             !existingTask || 
@@ -431,13 +767,24 @@ export default function App() {
             existingTask.title !== taskCopy.title ||
             !existingTask.calendarEventId
           ) {
-            const syncResult = await syncTaskToGoogleCalendar(taskCopy, existingTask);
-            if (syncResult.calendarEventId) {
-              taskCopy.calendarEventId = syncResult.calendarEventId;
-              await saveTaskToFirestore(taskCopy);
+            try {
+              const syncResult = await syncTaskToGoogleCalendar(taskCopy, existingTask);
+              if (syncResult.calendarEventId) {
+                taskCopy.calendarEventId = syncResult.calendarEventId;
+              }
+            } catch (syncErr) {
+              console.warn("Failed to sync task to Google Calendar:", syncErr);
             }
           }
         }
+        
+        // Always save the updated scheduler details (scheduled_start, scheduled_end, etc.) directly to Firestore!
+        try {
+          await saveTaskToFirestore(taskCopy);
+        } catch (saveErr) {
+          console.warn(`Failed to save task update to Firestore for task ID ${taskCopy.id}:`, saveErr);
+        }
+        
         finalizedTasks.push(taskCopy);
       }
 
@@ -460,18 +807,35 @@ export default function App() {
     if (!confirmed) return;
 
     try {
-      const startTime = new Date(task.deadline);
-      // Event lasts 1 hour by default
-      const endTime = new Date(startTime.getTime() + 60 * 60 * 1000);
+      const syncResult = await syncTaskToGoogleCalendar(task, task);
+      
+      const updatedFields: any = {
+        ...task,
+        calendarEventId: syncResult.calendarEventId,
+      };
 
-      await createCalendarEvent({
-        summary: task.title,
-        description: task.description || "Synthesized productivity block in Aura Workspace.",
-        start: { dateTime: startTime.toISOString() },
-        end: { dateTime: endTime.toISOString() }
-      });
+      // If the task does not have scheduled start/end times yet, set them to match the Google Calendar event times
+      if (!task.scheduled_start || !task.scheduled_end) {
+        const startTime = task.scheduled_start ? new Date(task.scheduled_start) : new Date(task.deadline);
+        const durationMin = task.estimated_effort > 0 ? task.estimated_effort : 60;
+        const endTime = task.scheduled_end ? new Date(task.scheduled_end) : new Date(startTime.getTime() + durationMin * 60 * 1000);
+        
+        updatedFields.scheduled_start = startTime.toISOString();
+        updatedFields.scheduled_end = endTime.toISOString();
+        updatedFields.scheduling_reason = "Manually synchronized to Google Calendar slot.";
+      }
 
-      triggerAlert("success", "Scheduled on Google Calendar!");
+      await saveTaskToFirestore(updatedFields);
+
+      // Instantly load refreshed list from Firestore
+      const refreshedTasks = await getTasksFromFirestore();
+      setTasks(refreshedTasks);
+
+      if (syncResult.warning) {
+        triggerAlert("error", syncResult.warning);
+      } else {
+        triggerAlert("success", "Scheduled and synchronized on Google Calendar!");
+      }
     } catch (err: any) {
       console.error(err);
       triggerAlert("error", err.message || "Failed to schedule Calendar event.");
@@ -488,6 +852,7 @@ export default function App() {
   const filteredTasks = tasks.filter(t => {
     if (activeFilter === "done") return t.status === "done";
     if (activeFilter === "overdue") return t.status === "overdue";
+    if (activeFilter === "habits") return false;
     return t.status !== "done"; // not_started, in_progress, overdue (if looking at active, might exclude done)
   });
 
@@ -664,6 +1029,17 @@ export default function App() {
                     >
                       Archive Logs
                     </button>
+                    <button
+                      onClick={() => setActiveFilter("habits")}
+                      id="tab-habits"
+                      className={`px-4 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                        activeFilter === "habits"
+                          ? "bg-white dark:bg-zinc-850 text-[#2D2C2A] dark:text-zinc-150 shadow-xs font-bold border-l-2 border-[#D97757]"
+                          : "text-[#7A756E] hover:text-[#2D2C2A] dark:text-zinc-400"
+                      }`}
+                    >
+                      Habits & Streaks
+                    </button>
                   </div>
 
                   {/* AI trigger compile & Create task CTA */}
@@ -701,7 +1077,17 @@ export default function App() {
 
                 {/* Task Listing with Layout Animations */}
                 <div className="space-y-4">
-                  {loadingData ? (
+                  {activeFilter === "habits" ? (
+                    <HabitTracker
+                      tasks={tasks}
+                      onLogCompletion={handleLogHabitCompletion}
+                      onEdit={(t) => {
+                        setEditingTask(t);
+                        setIsTaskModalOpen(true);
+                      }}
+                      onDelete={handleDeleteTask}
+                    />
+                  ) : loadingData ? (
                     <div className="py-24 text-center space-y-3">
                       <Loader2 className="w-10 h-10 animate-spin text-zinc-400 mx-auto" />
                       <p className="text-xs text-zinc-400 font-mono uppercase tracking-widest">Compiling Workspace telemetry...</p>
@@ -767,6 +1153,7 @@ export default function App() {
                   tasks={tasks}
                   goals={goals}
                   onRefreshTasks={loadWorkspaceData}
+                  onSaveTask={handleSaveTask}
                 />
               </div>
 
@@ -789,6 +1176,32 @@ export default function App() {
                   </div>
 
                   <div className="space-y-3 max-h-[350px] overflow-y-auto pr-1">
+                    {draftConfirmations.length > 0 && (
+                      <div className="p-3.5 rounded-2xl bg-amber-500/10 dark:bg-amber-500/5 border border-amber-500/20 space-y-2.5">
+                        <div className="flex items-center gap-1.5 text-xs font-bold text-amber-800 dark:text-amber-400">
+                          <Inbox className="w-4 h-4" />
+                          <span>Overdue Delay Drafts Saved to Gmail</span>
+                        </div>
+                        <div className="space-y-1.5">
+                          {draftConfirmations.map((draft, idx) => (
+                            <div key={idx} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-150 dark:border-zinc-800 text-xs">
+                              <span className="font-medium text-zinc-700 dark:text-zinc-200 truncate max-w-[200px]">
+                                {draft.title}
+                              </span>
+                              <a
+                                href={draft.gmailLink}
+                                target="_blank"
+                                rel="noreferrer"
+                                className="px-2.5 py-1 rounded-lg bg-zinc-950 dark:bg-zinc-100 hover:opacity-90 text-white dark:text-zinc-950 text-[10px] font-bold transition-all cursor-pointer inline-flex items-center gap-1"
+                              >
+                                <span>Open Drafts</span>
+                              </a>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
                     {tasks.filter(t => t.status !== "done").length === 0 ? (
                       <p className="text-xs text-zinc-400 dark:text-zinc-500 italic">No active tasks to prioritize or schedule.</p>
                     ) : (
@@ -853,6 +1266,24 @@ export default function App() {
                     tasks={tasks}
                     onCreateGoal={handleCreateGoal}
                     onDeleteGoal={handleDeleteGoal}
+                    onDecomposeGoal={handleDecomposeGoal}
+                  />
+                </div>
+
+                {/* Notes Scratchpad */}
+                <div className="rounded-[28px] border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/70 dark:bg-zinc-900/40 p-5 space-y-4 shadow-sm animate-fade-in">
+                  <div className="flex items-center gap-2 border-b border-[#E8E4DF] dark:border-zinc-800 pb-3">
+                    <Sparkles className="w-4 h-4 text-[#D97757]" />
+                    <h3 className="text-sm font-bold font-serif italic tracking-tight text-[#2D2C2A] dark:text-zinc-100">
+                      Workspace Notes Scratchpad
+                    </h3>
+                  </div>
+
+                  <NotesManager 
+                    notes={notes}
+                    onSaveNote={handleSaveNote}
+                    onDeleteNote={handleDeleteNote}
+                    onTasksExtracted={handleTasksExtracted}
                   />
                 </div>
 

@@ -42,7 +42,14 @@ export function TaskCard({
   const diffDays = diffTime / (1000 * 60 * 60 * 24);
 
   const isDone = task.status === "done";
-  const isOverdue = task.status === "overdue" || (diffTime < 0 && !isDone);
+  let isOverdue = task.status === "overdue";
+  if (!isDone && !isOverdue) {
+    if (task.scheduled_end) {
+      isOverdue = now.getTime() >= new Date(task.scheduled_end).getTime();
+    } else {
+      isOverdue = diffTime < 0;
+    }
+  }
 
   // Link Goal
   const linkedGoal = goals.find(g => g.id === task.goal_id);
@@ -106,6 +113,22 @@ export function TaskCard({
       });
     } catch {
       return dateStr;
+    }
+  };
+
+  const formatTimeRange = (startStr?: string | null, endStr?: string | null) => {
+    if (!startStr || !endStr) return "";
+    try {
+      const start = new Date(startStr);
+      const end = new Date(endStr);
+      
+      const datePart = start.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+      const startTimePart = start.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+      const endTimePart = end.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+      
+      return `${datePart}, ${startTimePart} - ${endTimePart}`;
+    } catch {
+      return "";
     }
   };
 
@@ -181,14 +204,57 @@ export function TaskCard({
 
       <div className={`mt-4.5 flex flex-wrap items-center justify-between gap-3 border-t pt-3.5 ${borderClass}`}>
         {/* Urgent State / Due Indicator */}
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <div className={`inline-flex items-center gap-1 px-3 py-1 rounded-full text-[10px] uppercase tracking-wider font-semibold select-none border ${badgeClass}`}>
             <span>{urgencyStatusText}</span>
           </div>
 
-          <span className={`text-xs inline-flex items-center gap-1 opacity-70 ${isDone ? "text-zinc-400" : textClass}`}>
-            <Calendar className="w-3.5 h-3.5 opacity-60" />
-            {formatDeadline(task.deadline)}
+          {task.replanned && (
+            <span className="inline-flex items-center gap-1 bg-amber-50 dark:bg-amber-950/30 text-amber-700 dark:text-amber-400 text-[10px] font-bold px-2.5 py-1 rounded-full border border-amber-200/50 dark:border-amber-900/30 shadow-xs">
+              <Sparkles className="w-3 h-3 text-amber-600 dark:text-amber-400 animate-pulse" />
+              <span>Rescheduled by AI</span>
+            </span>
+          )}
+
+          <span className={`text-xs flex flex-col gap-1 opacity-70 ${isDone ? "text-zinc-400" : textClass}`} id={`task-time-info-${task.id}`}>
+            {task.scheduled_start && task.scheduled_end ? (
+              <>
+                <span className="inline-flex items-center gap-1 font-medium text-[11px]" id={`task-scheduled-time-${task.id}`}>
+                  <Clock className="w-3.5 h-3.5 opacity-60" />
+                  Scheduled: {formatTimeRange(task.scheduled_start, task.scheduled_end)}
+                </span>
+                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#D97757] dark:text-[#E88A6D]" id={`task-updated-deadline-${task.id}`}>
+                  <Calendar className="w-3.5 h-3.5 opacity-60" />
+                  Updated Deadline: {formatDeadline(task.scheduled_end)}
+                </span>
+                {task.initial_deadline && task.initial_deadline !== task.scheduled_end && (
+                  <span className="inline-flex items-center gap-1 text-[10px] opacity-75 line-through decoration-zinc-400/80" id={`task-initial-deadline-${task.id}`}>
+                    <Calendar className="w-3.5 h-3.5 opacity-60" />
+                    Initial Deadline: {formatDeadline(task.initial_deadline)}
+                  </span>
+                )}
+              </>
+            ) : (
+              <span className="flex flex-col gap-1" id={`task-deadline-only-${task.id}`}>
+                {task.initial_deadline && task.initial_deadline !== task.deadline ? (
+                  <>
+                    <span className="inline-flex items-center gap-1 font-semibold text-[11px] text-[#D97757] dark:text-[#E88A6D]" id={`task-updated-deadline-${task.id}`}>
+                      <Calendar className="w-3.5 h-3.5 opacity-60" />
+                      Updated Deadline: {formatDeadline(task.deadline)}
+                    </span>
+                    <span className="inline-flex items-center gap-1 text-[10px] opacity-75 line-through decoration-zinc-400/80" id={`task-initial-deadline-${task.id}`}>
+                      <Calendar className="w-3.5 h-3.5 opacity-60" />
+                      Initial Deadline: {formatDeadline(task.initial_deadline)}
+                    </span>
+                  </>
+                ) : (
+                  <span className="inline-flex items-center gap-1 font-semibold text-[11px]" id={`task-updated-deadline-${task.id}`}>
+                    <Calendar className="w-3.5 h-3.5 opacity-60" />
+                    Deadline: {formatDeadline(task.deadline)}
+                  </span>
+                )}
+              </span>
+            )}
           </span>
         </div>
 

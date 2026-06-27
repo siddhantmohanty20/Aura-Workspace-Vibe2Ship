@@ -44,6 +44,25 @@
         "title",
         "created_at"
       ]
+    },
+    "Note": {
+      "title": "Note",
+      "description": "Represents a free-form written note belonging to a user",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "userId": { "type": "string" },
+        "content": { "type": "string" },
+        "created_at": { "type": "string", "format": "date-time" },
+        "updated_at": { "type": "string", "format": "date-time" }
+      },
+      "required": [
+        "id",
+        "userId",
+        "content",
+        "created_at",
+        "updated_at"
+      ]
     }
   },
   "firestore": {
@@ -54,6 +73,10 @@
     "goals/{goalId}": {
       "schema": "Goal",
       "description": "User productivity goals"
+    },
+    "notes/{noteId}": {
+      "schema": "Note",
+      "description": "User free-form notes"
     }
   }
 }

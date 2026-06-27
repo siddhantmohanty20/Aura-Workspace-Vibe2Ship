@@ -8,7 +8,10 @@ import {
   ChevronDown, 
   Target,
   Sparkles,
-  ClipboardList
+  ClipboardList,
+  Loader2,
+  Mic,
+  MicOff
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -17,22 +20,79 @@ interface GoalManagerProps {
   tasks: Task[];
   onCreateGoal: (title: string) => void;
   onDeleteGoal: (id: string) => void;
+  onDecomposeGoal?: (title: string) => Promise<void>;
 }
 
 export function GoalManager({
   goals,
   tasks,
   onCreateGoal,
-  onDeleteGoal
+  onDeleteGoal,
+  onDecomposeGoal
 }: GoalManagerProps) {
   const [newTitle, setNewTitle] = useState("");
   const [expandedGoalId, setExpandedGoalId] = useState<string | null>(null);
+  const [isDecomposing, setIsDecomposing] = useState(false);
+  const [isListening, setIsListening] = useState(false);
+  const [voiceAlert, setVoiceAlert] = useState("");
+  const [transcriptionConfirm, setTranscriptionConfirm] = useState<string | null>(null);
+
+  const startVoiceInput = () => {
+    const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).speechRecognition;
+    if (!SpeechRecognition) {
+      setVoiceAlert("Speech Recognition not supported in this browser.");
+      return;
+    }
+
+    setIsListening(true);
+    setVoiceAlert("");
+    setTranscriptionConfirm(null);
+    const recognition = new SpeechRecognition();
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      if (!transcript || transcript.trim().length === 0) {
+        setVoiceAlert("Could not hear anything clearly. Please try again.");
+      } else {
+        setTranscriptionConfirm(transcript);
+      }
+      setIsListening(false);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error(event);
+      setVoiceAlert("Voice error: " + event.error);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.start();
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     if (!newTitle.trim()) return;
     onCreateGoal(newTitle.trim());
     setNewTitle("");
+  };
+
+  const handleDecompose = async () => {
+    if (!newTitle.trim() || !onDecomposeGoal) return;
+    setIsDecomposing(true);
+    try {
+      await onDecomposeGoal(newTitle.trim());
+      setNewTitle("");
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsDecomposing(false);
+    }
   };
 
   const toggleExpand = (id: string) => {
@@ -42,22 +102,94 @@ export function GoalManager({
   return (
     <div className="space-y-6 flex flex-col justify-stretch">
       {/* Create Goal Form */}
-      <form onSubmit={handleSubmit} className="flex gap-2">
-        <input
-          type="text"
-          placeholder="Design a major business goal..."
-          value={newTitle}
-          onChange={(e) => setNewTitle(e.target.value)}
-          className="flex-1 px-4 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/50 text-zinc-800 dark:text-zinc-250 text-sm focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all font-display"
-        />
-        <button
-          type="submit"
-          disabled={!newTitle.trim()}
-          className="px-5 bg-[#D97757] text-white rounded-xl text-xs font-bold hover:bg-[#D97757]/90 shadow-sm active:scale-95 disabled:scale-100 disabled:opacity-40 transition-all flex items-center gap-1.5"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Add Goal</span>
-        </button>
+      <form onSubmit={handleSubmit} className="w-full">
+        <div className="flex flex-col gap-2 w-full">
+          <div className="flex gap-2">
+            <input
+              type="text"
+              placeholder="Design a major business goal..."
+              value={newTitle}
+              onChange={(e) => setNewTitle(e.target.value)}
+              className="flex-1 px-4 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white/70 dark:bg-zinc-900/50 text-zinc-800 dark:text-zinc-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all font-display"
+            />
+            <button
+              type="button"
+              onClick={startVoiceInput}
+              disabled={isListening}
+              className={`p-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 transition-all ${
+                isListening 
+                  ? 'bg-rose-500 text-white animate-pulse' 
+                  : 'bg-white/70 dark:bg-zinc-900/50 text-zinc-500 hover:text-[#D97757] hover:border-[#D97757] cursor-pointer'
+              }`}
+              title="Voice Dictation"
+            >
+              {isListening ? <MicOff className="w-4 h-4 animate-bounce" /> : <Mic className="w-4 h-4" />}
+            </button>
+          </div>
+
+          {voiceAlert && (
+            <p className="text-[10px] text-rose-500 font-mono italic px-1">{voiceAlert}</p>
+          )}
+
+          {transcriptionConfirm && (
+            <div className="p-3.5 rounded-2xl bg-emerald-50 dark:bg-emerald-950/20 border border-emerald-150 dark:border-emerald-900/40 space-y-2.5 text-xs">
+              <p className="font-bold text-emerald-800 dark:text-emerald-400">Speech Transcribed:</p>
+              <p className="italic text-zinc-700 dark:text-zinc-200 bg-white/80 dark:bg-zinc-900/50 p-2.5 rounded-xl border border-zinc-100 dark:border-zinc-850">
+                "{transcriptionConfirm}"
+              </p>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setNewTitle(transcriptionConfirm);
+                    setTranscriptionConfirm(null);
+                  }}
+                  className="px-3.5 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 text-white font-bold cursor-pointer text-[11px]"
+                >
+                  Confirm & Use
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setTranscriptionConfirm(null)}
+                  className="px-3.5 py-1.5 rounded-lg bg-zinc-200 hover:bg-zinc-300 dark:bg-zinc-800 dark:hover:bg-zinc-700 text-zinc-700 dark:text-zinc-300 font-semibold cursor-pointer text-[11px]"
+                >
+                  Reject
+                </button>
+              </div>
+            </div>
+          )}
+
+          <div className="flex gap-2 justify-stretch">
+            <button
+              type="submit"
+              disabled={!newTitle.trim() || isDecomposing}
+              className="flex-1 py-2.5 bg-[#2D2C2A] text-white dark:bg-zinc-800 rounded-xl text-xs font-bold hover:bg-neutral-800 hover:dark:bg-zinc-700 shadow-sm active:scale-95 disabled:scale-100 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Add Goal</span>
+            </button>
+            {onDecomposeGoal && (
+              <button
+                type="button"
+                onClick={handleDecompose}
+                disabled={!newTitle.trim() || isDecomposing}
+                className="flex-1 py-2.5 bg-[#D4DBCB]/30 hover:bg-[#D4DBCB]/50 dark:bg-zinc-800 text-[#5A644D] dark:text-emerald-400 rounded-xl text-xs font-bold hover:bg-opacity-95 shadow-sm active:scale-95 disabled:scale-100 disabled:opacity-40 transition-all flex items-center justify-center gap-1.5"
+              >
+                {isDecomposing ? (
+                  <>
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    <span>Decomposing...</span>
+                  </>
+                ) : (
+                  <>
+                    <Sparkles className="w-3.5 h-3.5 text-[#D97757]" />
+                    <span>AI Decompose</span>
+                  </>
+                )}
+              </button>
+            )}
+          </div>
+        </div>
       </form>
 
       {/* Goal Listing */}

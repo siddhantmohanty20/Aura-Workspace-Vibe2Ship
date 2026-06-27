@@ -21,7 +21,35 @@ export function CalendarManager({ isAuthenticated, onAuthenticate }: CalendarMan
       // Fetch events starting from today
       const nowISO = new Date().toISOString();
       const items = await fetchCalendarEvents(nowISO);
-      setEvents(items);
+      
+      // Filter out exact same-day duplicates and cap non-Aura repeating events
+      const seenKeys = new Set<string>();
+      const summaryCounts: Record<string, number> = {};
+      
+      const filtered = items.filter(event => {
+        const summary = (event.summary || "").trim();
+        const start = event.start?.dateTime || event.start?.date || "";
+        
+        // 1. Same summary on the exact same day/time
+        const key = `${summary}|${start}`;
+        if (seenKeys.has(key)) {
+          return false;
+        }
+        seenKeys.add(key);
+        
+        // 2. Cap repetitive non-Aura generic items to max 2 occurrences to keep space clean
+        const isAuraEvent = event.description?.includes("Aura") || false;
+        if (!isAuraEvent) {
+          summaryCounts[summary] = (summaryCounts[summary] || 0) + 1;
+          if (summaryCounts[summary] > 2) {
+            return false;
+          }
+        }
+        
+        return true;
+      });
+      
+      setEvents(filtered.slice(0, 15));
     } catch (err: any) {
       console.error(err);
       setError("Failed to sync Google Calendar. Your session may have expired.");

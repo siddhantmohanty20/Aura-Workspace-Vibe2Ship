@@ -87,25 +87,94 @@ app.post("/api/prioritize", async (req, res) => {
   const currentTimeStr = currentTime || new Date().toISOString();
   const now = new Date(currentTimeStr);
 
+  // Identify tasks to protect: incomplete tasks whose scheduled end time is in the future relative to "now"
+  // (This covers both currently active scheduled tasks and future scheduled tasks whose slots haven't ended yet)
+  const protectedTasks = tasks.filter((t: any) => {
+    if (t.status === "done") return false;
+    if (!t.scheduled_start || !t.scheduled_end) return false;
+    const end = new Date(t.scheduled_end);
+    return now.getTime() < end.getTime();
+  });
+
+  const protectedIds = new Set(protectedTasks.map((t: any) => t.id));
+  const tasksToProcess = tasks.filter((t: any) => !protectedIds.has(t.id));
+
+  // If all tasks are protected or done, we can safely return the exact original task array without modification
+  if (tasksToProcess.length === 0) {
+    return res.json({ tasks });
+  }
+
   // Fallback / Basic priority scoring & scheduling if Gemini is not configured
   const doFallbackScoring = () => {
-    let nextAvailableStart = new Date(Date.UTC(
+    // Collect all busy intervals including protected tasks' slots so they are fully respected and never overlapped
+    const busyIntervals = [
+      ...freeBusy.map((fb: any) => ({
+        start: new Date(fb.start).getTime(),
+        end: new Date(fb.end).getTime()
+      })),
+      ...protectedTasks.map((t: any) => ({
+        start: new Date(t.scheduled_start).getTime(),
+        end: new Date(t.scheduled_end).getTime()
+      }))
+    ];
+
+    const findOpenSlot = (startFrom: Date, durationMin: number) => {
+      let currentStart = new Date(startFrom.getTime());
+      
+      while (true) {
+        const currentEnd = new Date(currentStart.getTime() + durationMin * 60 * 1000);
+        
+        // Check daytime constraint (between 08:00 and 20:00 UTC)
+        const startHour = currentStart.getUTCHours();
+        const endHour = currentEnd.getUTCHours();
+        
+        if (startHour < 8 || startHour >= 20 || endHour > 20 || currentStart.getUTCDate() !== currentEnd.getUTCDate()) {
+          currentStart.setUTCHours(8, 0, 0, 0);
+          if (startHour >= 20 || currentStart.getUTCDate() !== currentEnd.getUTCDate()) {
+            currentStart.setUTCDate(currentStart.getUTCDate() + 1);
+          }
+          continue;
+        }
+        
+        const sTime = currentStart.getTime();
+        const eTime = currentEnd.getTime();
+        
+        const conflict = busyIntervals.find(interval => {
+          return sTime < interval.end && eTime > interval.start;
+        });
+        
+        if (conflict) {
+          currentStart = new Date(conflict.end + 5 * 60 * 1000); // 5 mins buffer
+          continue;
+        }
+        
+        return { start: currentStart, end: currentEnd };
+      }
+    };
+
+    let currentSearchStart = new Date(Date.UTC(
       now.getUTCFullYear(),
       now.getUTCMonth(),
       now.getUTCDate() + 1,
       9, 0, 0, 0
     ));
 
-    return tasks.map((t: any) => {
+    const processed = tasksToProcess.map((t: any) => {
       const deadlineDate = new Date(t.deadline);
-      const isPast = deadlineDate.getTime() < now.getTime();
       let calculatedStatus = t.status;
       
       if (t.status !== "done") {
-        if (isPast) {
-          calculatedStatus = "overdue";
-        } else if (t.status === "overdue") {
-          calculatedStatus = "not_started";
+        if (t.scheduled_end) {
+          const end = new Date(t.scheduled_end);
+          if (now.getTime() >= end.getTime()) {
+            calculatedStatus = "overdue";
+          }
+        } else {
+          if (deadlineDate.getTime() < now.getTime()) {
+            calculatedStatus = "overdue";
+          } else if (t.status === "overdue") {
+            calculatedStatus = "not_started";
+          }
         }
       }
 
@@ -138,16 +207,22 @@ app.post("/api/prioritize", async (req, res) => {
       let scheduling_warning = "";
 
       if (calculatedStatus !== "done") {
-        scheduled_start = nextAvailableStart.toISOString();
-        const end = new Date(nextAvailableStart.getTime() + finalEffort * 60 * 1000);
-        scheduled_end = end.toISOString();
-        const startString = `${nextAvailableStart.getUTCFullYear()}-${String(nextAvailableStart.getUTCMonth()+1).padStart(2,'0')}-${String(nextAvailableStart.getUTCDate()).padStart(2,'0')} ${String(nextAvailableStart.getUTCHours()).padStart(2,'0')}:${String(nextAvailableStart.getUTCMinutes()).padStart(2,'0')} UTC`;
+        const slot = findOpenSlot(currentSearchStart, finalEffort);
+        scheduled_start = slot.start.toISOString();
+        scheduled_end = slot.end.toISOString();
+        
+        const startString = `${slot.start.getUTCFullYear()}-${String(slot.start.getUTCMonth()+1).padStart(2,'0')}-${String(slot.start.getUTCDate()).padStart(2,'0')} ${String(slot.start.getUTCHours()).padStart(2,'0')}:${String(slot.start.getUTCMinutes()).padStart(2,'0')} UTC`;
         scheduling_reason = `Assigned to sequential slot starting ${startString}`;
-        if (end.getTime() > deadlineDate.getTime()) {
+        if (slot.end.getTime() > deadlineDate.getTime()) {
           scheduling_warning = `Warning: Scheduled slot ends after the deadline of ${deadlineDate.toISOString()}`;
         }
-        // Advance next start by effort + 30 mins buffer
-        nextAvailableStart = new Date(end.getTime() + 30 * 60 * 1000);
+        
+        busyIntervals.push({
+          start: slot.start.getTime(),
+          end: slot.end.getTime()
+        });
+        
+        currentSearchStart = new Date(slot.end.getTime() + 30 * 60 * 1000);
       }
 
       return {
@@ -162,6 +237,24 @@ app.post("/api/prioritize", async (req, res) => {
         scheduling_warning,
       };
     });
+
+    // Merge them back, ensuring protected tasks are exactly preserved
+    const finalFallbackTasks = tasks.map((originalTask: any) => {
+      const isProt = protectedTasks.some((pt: any) => pt.id === originalTask.id);
+      if (isProt) {
+        return originalTask;
+      }
+      const processedTask = processed.find((pt: any) => pt.id === originalTask.id);
+      if (processedTask) {
+        return {
+          ...originalTask,
+          ...processedTask
+        };
+      }
+      return originalTask;
+    });
+
+    return finalFallbackTasks;
   };
 
   if (!aiClient) {
@@ -170,6 +263,12 @@ app.post("/api/prioritize", async (req, res) => {
   }
 
   try {
+    const protectedBusyBlocks = protectedTasks.map((t: any) => ({
+      start: t.scheduled_start,
+      end: t.scheduled_end
+    }));
+    const combinedFreeBusy = [...freeBusy, ...protectedBusyBlocks];
+
     const prompt = `
 You are a high-performance productivity and calendar scheduling assistant. 
 
@@ -191,7 +290,7 @@ Analyze the following user tasks, goals, and existing calendar commitments (busy
 
 Here are the inputs:
 1. Tasks:
-${JSON.stringify(tasks.map((t: any) => ({
+${JSON.stringify(tasksToProcess.map((t: any) => ({
   id: t.id,
   title: t.title,
   description: t.description,
@@ -205,7 +304,7 @@ ${JSON.stringify(tasks.map((t: any) => ({
 ${JSON.stringify(goals, null, 2)}
 
 3. User's Google Calendar busy time intervals (freeBusy slots during the current week):
-${JSON.stringify(freeBusy, null, 2)}
+${JSON.stringify(combinedFreeBusy, null, 2)}
 
 Please perform the following optimizations for each task:
 
@@ -222,7 +321,8 @@ Please perform the following optimizations for each task:
 
 3. DETECT OVERDUE:
    - If the task is completed ("done"), keep it as "done".
-   - If the task's deadline is in the past relative to the current UTC reference time (${now.toISOString()}) and is not "done", set status to "overdue".
+   - If the task has a previously scheduled end time (scheduled_end) and its end time has fully passed (is on or before ${now.toISOString()}) and is not "done", set status to "overdue".
+   - If the task has no previously scheduled end time, and its deadline has fully passed (is on or before ${now.toISOString()}) and is not "done", set status to "overdue".
    - Otherwise, preserve its current status.
 
 4. ALLOCATE CALENDAR SLOTS (SCHEDULING):
@@ -274,10 +374,144 @@ Format your output STRICTLY as a JSON object containing a "tasks" list matching 
 
     const text = response.text || "{\"tasks\":[]}";
     const parsed = JSON.parse(text);
-    return res.json({ tasks: parsed.tasks || [] });
+    const returnedTasks = parsed.tasks || [];
+    const processedMap = new Map(returnedTasks.map((t: any) => [t.id, t]));
+
+    const finalTasks = tasks.map((originalTask: any) => {
+      // If it's a protected task, keep it exactly as is
+      const isProt = protectedTasks.some((pt: any) => pt.id === originalTask.id);
+      if (isProt) {
+        return originalTask;
+      }
+      // If it was processed by Gemini, return the Gemini output merged with original attributes
+      const geminiTask = processedMap.get(originalTask.id);
+      if (geminiTask) {
+        return {
+          ...originalTask,
+          ...(geminiTask as any)
+        };
+      }
+      // Fallback: return original if not found
+      return originalTask;
+    });
+
+    return res.json({ tasks: finalTasks });
   } catch (error) {
     console.error("Error running AI prioritization and scheduling, falling back:", error);
     return res.json({ tasks: doFallbackScoring() });
+  }
+});
+
+// API: Extract structured tasks from goals or free-form notes
+app.post("/api/extract-tasks", async (req, res) => {
+  const { text = "", type = "notes", currentTime } = req.body;
+  if (!text || !text.trim()) {
+    return res.json({ tasks: [] });
+  }
+
+  const now = new Date(currentTime || new Date().toISOString());
+
+  if (!aiClient) {
+    console.log("GEMINI_API_KEY not configured, using offline fallback parsing for extract-tasks");
+    // Direct deterministic fallback
+    const lines = text.split("\n")
+      .map((l: any) => l.trim())
+      .filter((l: any) => l.length > 5 && !l.startsWith("#"));
+
+    const count = type === "goal" ? Math.min(Math.max(lines.length, 4), 6) : Math.min(lines.length, 6);
+    const fallbackTasks = [];
+    
+    for (let i = 0; i < (count || 4); i++) {
+      const title = lines[i] ? lines[i].replace(/^[-*\s\d.]+(\s*)/, "").substring(0, 60) : `Step ${i + 1} for ${text.substring(0, 30)}`;
+      const deadline = new Date(now.getTime() + (i + 1) * 24 * 60 * 60 * 1000).toISOString();
+      fallbackTasks.push({
+        title,
+        description: `Auto-generated checklist item ${i + 1} extracted from input context.`,
+        estimated_effort: 45,
+        deadline
+      });
+    }
+    return res.json({ tasks: fallbackTasks });
+  }
+
+  try {
+    let prompt = "";
+    if (type === "goal") {
+      prompt = `
+You are an expert project manager and decomposition assistant.
+Your task is to take the high-level goal and break it down into 4 to 6 concrete, sequential, and highly actionable sub-tasks.
+
+HIGH-LEVEL GOAL: "${text}"
+
+TIME GROUNDING REFERENCE:
+- Today is UTC: ${now.toUTCString()} (ISO: ${now.toISOString()})
+- All deadlines for sub-tasks MUST be strictly in the future relative to today's date.
+- Suggest realistic deadlines staggered sequentially over the coming days or weeks in UTC format.
+- Format each deadline as a complete ISO-8601 UTC string.
+
+For each sub-task, provide:
+1. "title": A clear, action-oriented title.
+2. "description": A short explanation of what is required.
+3. "estimated_effort": A realistic estimated effort in minutes (between 30 and 180).
+4. "deadline": A suggested deadline (ISO-8601 UTC string).
+`;
+    } else {
+      prompt = `
+You are an advanced text analysis and task extraction assistant.
+Your task is to analyze the following free-form written note, identify all actionable items, and convert each item into a structured task.
+
+NOTE CONTENT:
+"""
+${text}
+"""
+
+TIME GROUNDING REFERENCE:
+- Today is UTC: ${now.toUTCString()} (ISO: ${now.toISOString()})
+- For each task, infer a realistic deadline:
+  * If a deadline, day, or timeframe is mentioned in the text (e.g. "by tomorrow", "this Friday", "in 3 days", "due June 28"), calculate the precise ISO-8601 UTC date relative to today's date (${now.toISOString()}).
+  * If no deadline is mentioned, suggest a realistic deadline in the next 1 to 4 days relative to today.
+- All deadlines must be formatted as ISO-8601 UTC strings.
+
+For each extracted task, provide:
+1. "title": A clear, action-oriented title.
+2. "description": Context extracted from the note about this action.
+3. "estimated_effort": Estimated duration in minutes based on the action (between 15 and 240).
+4. "deadline": The calculated/inferred deadline (ISO-8601 UTC string).
+`;
+    }
+
+    const response = await generateContentWithRetry(aiClient, {
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            tasks: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                properties: {
+                  title: { type: Type.STRING, description: "Clear, action-oriented task title" },
+                  description: { type: Type.STRING, description: "Detailed description of what needs to be done" },
+                  estimated_effort: { type: Type.INTEGER, description: "Estimated effort in minutes" },
+                  deadline: { type: Type.STRING, description: "ISO-8601 deadline string" }
+                },
+                required: ["title", "description", "estimated_effort", "deadline"]
+              }
+            }
+          },
+          required: ["tasks"]
+        }
+      }
+    });
+
+    const parsed = JSON.parse(response.text || "{\"tasks\":[]}");
+    return res.json(parsed);
+  } catch (error) {
+    console.error("Error extracting tasks with Gemini:", error);
+    return res.status(500).json({ error: "Failed to extract tasks" });
   }
 });
 

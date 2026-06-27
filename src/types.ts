@@ -18,6 +18,10 @@ export interface Task {
   scheduled_end?: string | null;
   scheduling_reason?: string;
   scheduling_warning?: string;
+  initial_deadline?: string | null;
+  replanned?: boolean | null;
+  recurrence?: 'none' | 'daily' | 'weekly';
+  completions?: string[];
 }
 
 export interface Goal {
@@ -25,6 +29,14 @@ export interface Goal {
   userId: string;
   title: string;
   created_at: string;
+}
+
+export interface Note {
+  id: string;
+  userId: string;
+  content: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ChatMessage {

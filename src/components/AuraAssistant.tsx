@@ -20,9 +20,10 @@ interface AuraAssistantProps {
   tasks: Task[];
   goals: Goal[];
   onRefreshTasks: () => void;
+  onSaveTask?: (taskData: any) => Promise<void>;
 }
 
-export function AuraAssistant({ tasks, goals, onRefreshTasks }: AuraAssistantProps) {
+export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: AuraAssistantProps) {
   const [activeTab, setActiveTab] = useState<"text" | "live">("text");
   const [textMessages, setTextMessages] = useState<ChatMessage[]>([
     {
@@ -116,14 +117,24 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks }: AuraAssistantPro
       if (data.action) {
         try {
           if (data.action.type === "create_task") {
-            await saveTaskToFirestore({
-              title: data.action.params.title,
-              description: data.action.params.description || "Created via Aura Assistant",
-              deadline: data.action.params.deadline,
-              estimated_effort: data.action.params.estimated_effort || 30,
-              goal_id: null
-            });
-            onRefreshTasks();
+            if (onSaveTask) {
+              await onSaveTask({
+                title: data.action.params.title,
+                description: data.action.params.description || "Created via Aura Assistant",
+                deadline: data.action.params.deadline,
+                estimated_effort: data.action.params.estimated_effort || 30,
+                goal_id: null
+              });
+            } else {
+              await saveTaskToFirestore({
+                title: data.action.params.title,
+                description: data.action.params.description || "Created via Aura Assistant",
+                deadline: data.action.params.deadline,
+                estimated_effort: data.action.params.estimated_effort || 30,
+                goal_id: null
+              });
+              onRefreshTasks();
+            }
           } else if (data.action.type === "create_calendar_event") {
             await createCalendarEvent({
               summary: data.action.params.summary,
@@ -236,14 +247,24 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks }: AuraAssistantPro
         if (data.action) {
           try {
             if (data.action.type === "create_task") {
-              await saveTaskToFirestore({
-                title: data.action.params.title,
-                description: data.action.params.description || "Created via Aura Voice Assistant",
-                deadline: data.action.params.deadline,
-                estimated_effort: data.action.params.estimated_effort || 30,
-                goal_id: null
-              });
-              onRefreshTasks();
+              if (onSaveTask) {
+                await onSaveTask({
+                  title: data.action.params.title,
+                  description: data.action.params.description || "Created via Aura Voice Assistant",
+                  deadline: data.action.params.deadline,
+                  estimated_effort: data.action.params.estimated_effort || 30,
+                  goal_id: null
+                });
+              } else {
+                await saveTaskToFirestore({
+                  title: data.action.params.title,
+                  description: data.action.params.description || "Created via Aura Voice Assistant",
+                  deadline: data.action.params.deadline,
+                  estimated_effort: data.action.params.estimated_effort || 30,
+                  goal_id: null
+                });
+                onRefreshTasks();
+              }
             } else if (data.action.type === "create_calendar_event") {
               await createCalendarEvent({
                 summary: data.action.params.summary,
