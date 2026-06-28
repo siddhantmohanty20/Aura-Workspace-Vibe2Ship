@@ -86,20 +86,56 @@ export async function getTasksFromFirestore(): Promise<Task[]> {
       } as Task);
     });
 
-    // Calculate local overdue status on-the-fly relative to current real-world time
+    // Calculate local overdue/recurring status on-the-fly relative to current real-world time
     const now = new Date();
+    const todayStr = now.toISOString().split("T")[0];
+    const getStartOfWeekString = (d: Date) => {
+      const date = new Date(d);
+      const day = date.getDay();
+      const diff = date.getDate() - day;
+      return new Date(date.setDate(diff)).toISOString().split('T')[0];
+    };
 
     const adjustedList = list.map(t => {
-      if (t.status !== "done") {
-        if (t.scheduled_end) {
-          const end = new Date(t.scheduled_end);
-          if (now.getTime() >= end.getTime() && t.status !== "overdue") {
-            t.status = "overdue";
+      if (t.recurrence && t.recurrence !== "none") {
+        let completed = false;
+        let lastComp: string | null = null;
+        if (t.completions && t.completions.length > 0) {
+          if (t.recurrence === "daily") {
+            const matched = t.completions.filter(c => c.startsWith(todayStr));
+            if (matched.length > 0) {
+              completed = true;
+              lastComp = matched[matched.length - 1];
+            }
+          } else if (t.recurrence === "weekly") {
+            const currentWeekStr = getStartOfWeekString(now);
+            const matched = t.completions.filter(c => getStartOfWeekString(new Date(c)) === currentWeekStr);
+            if (matched.length > 0) {
+              completed = true;
+              lastComp = matched[matched.length - 1];
+            }
           }
+        }
+
+        if (completed) {
+          t.status = "done";
+          t.completed_at = lastComp;
         } else {
-          const deadlineDate = new Date(t.deadline);
-          if (deadlineDate.getTime() < now.getTime() && t.status !== "overdue") {
-            t.status = "overdue";
+          t.status = "not_started";
+          t.completed_at = null;
+        }
+      } else {
+        if (t.status !== "done") {
+          if (t.scheduled_end) {
+            const end = new Date(t.scheduled_end);
+            if (now.getTime() >= end.getTime() && t.status !== "overdue") {
+              t.status = "overdue";
+            }
+          } else {
+            const deadlineDate = new Date(t.deadline);
+            if (deadlineDate.getTime() < now.getTime() && t.status !== "overdue") {
+              t.status = "overdue";
+            }
           }
         }
       }
@@ -163,9 +199,11 @@ export async function saveTaskToFirestore(taskData: {
   scheduling_reason?: string;
   scheduling_warning?: string;
   initial_deadline?: string | null;
+  original_deadline?: string | null;
   replanned?: boolean | null;
   recurrence?: 'none' | 'daily' | 'weekly';
   completions?: string[];
+  completed_at?: string | null;
 }): Promise<string> {
   const user = auth.currentUser;
   if (!user) throw new Error("No active authenticated session.");
@@ -178,7 +216,7 @@ export async function saveTaskToFirestore(taskData: {
   let completedAtVal: string | null = null;
 
   if (determinedStatus === "done") {
-    completedAtVal = now.toISOString();
+    completedAtVal = taskData.completed_at || now.toISOString();
   } else if (deadlineDate.getTime() < now.getTime()) {
     determinedStatus = "overdue";
   }
@@ -224,6 +262,9 @@ export async function saveTaskToFirestore(taskData: {
       if (taskData.initial_deadline !== undefined) {
         updatePayload.initial_deadline = taskData.initial_deadline;
       }
+      if (taskData.original_deadline !== undefined) {
+        updatePayload.original_deadline = taskData.original_deadline;
+      }
       if (taskData.replanned !== undefined) {
         updatePayload.replanned = taskData.replanned;
       }
@@ -259,6 +300,7 @@ export async function saveTaskToFirestore(taskData: {
         scheduling_reason: taskData.scheduling_reason || "",
         scheduling_warning: taskData.scheduling_warning || "",
         initial_deadline: taskData.initial_deadline || taskData.deadline,
+        original_deadline: taskData.original_deadline || taskData.deadline,
         replanned: taskData.replanned || null,
         recurrence: taskData.recurrence || "none",
         completions: taskData.completions || [],
@@ -464,6 +506,13 @@ export async function triggerAiPrioritization(
           updatePayload.completed_at = new Date(currentTime).toISOString();
         } else if (opt.status !== "done") {
           updatePayload.completed_at = null;
+        }
+
+        // Fix calendar sync bug: write scheduled_end to deadline field on reschedule
+        if (opt.scheduled_end) {
+          updatePayload.deadline = opt.scheduled_end;
+          updatePayload.original_deadline = match.original_deadline || match.initial_deadline || match.deadline;
+          updatePayload.initial_deadline = match.initial_deadline || match.deadline;
         }
 
         await updateDoc(ref, updatePayload);

@@ -120,67 +120,100 @@ export function HabitTracker({ tasks, onLogCompletion, onEdit, onDelete }: Habit
     return task.completions.some(c => getStartOfWeek(new Date(c)) === currentWeekStr);
   };
 
-  const getRecentCompletionRate = (completions: string[] = [], type: "daily" | "weekly") => {
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const recent = (completions || []).filter(c => new Date(c) >= thirtyDaysAgo);
+  const renderCompletionHistory = (task: Task, type: "daily" | "weekly") => {
+    const completions = task.completions || [];
     
     if (type === "daily") {
-      // max 30 completions
-      const uniqueDays = new Set(recent.map(c => c.split('T')[0])).size;
-      return Math.min(100, Math.round((uniqueDays / 30) * 100));
+      // Last 14 days
+      const items = Array.from({ length: 14 }).map((_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (13 - i));
+        const dateStr = d.toISOString().split("T")[0];
+        const dayLabel = d.toLocaleDateString("en-US", { weekday: "narrow" });
+        const formattedDate = d.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+        const isCompleted = completions.some(c => {
+          try {
+            return new Date(c).toISOString().split("T")[0] === dateStr;
+          } catch {
+            return false;
+          }
+        });
+        return { isCompleted, dayLabel, formattedDate };
+      });
+
+      return (
+        <div className="space-y-1.5" id={`completion-history-${task.id}`}>
+          <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">
+            Last 14 Days
+          </p>
+          <div className="flex justify-between items-center gap-1 bg-zinc-50/50 dark:bg-zinc-950/20 p-2.5 rounded-2xl border border-[#F0EDE9] dark:border-zinc-800/40">
+            {items.map((item, i) => (
+              <div key={i} className="flex flex-col items-center gap-1 flex-1">
+                <span className="text-[9px] font-bold text-zinc-400 dark:text-zinc-500">{item.dayLabel}</span>
+                <div
+                  className={`w-3.5 h-3.5 rounded-[3px] transition-all duration-300 ${
+                    item.isCompleted
+                      ? "bg-emerald-500 dark:bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.3)]"
+                      : "bg-zinc-200 dark:bg-zinc-800"
+                  }`}
+                  title={`${item.formattedDate}: ${item.isCompleted ? "Completed" : "Missed"}`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      );
     } else {
-      // max 4 completions
+      // Last 8 weeks
       const getStartOfWeek = (d: Date) => {
         const date = new Date(d);
         const day = date.getDay();
         const diff = date.getDate() - day;
         return new Date(date.setDate(diff)).toISOString().split('T')[0];
       };
-      const uniqueWeeks = new Set(recent.map(c => getStartOfWeek(new Date(c)))).size;
-      return Math.min(100, Math.round((uniqueWeeks / 4) * 100));
+
+      const items = Array.from({ length: 8 }).map((_, i) => {
+        const d = new Date();
+        d.setDate(d.getDate() - (7 - i) * 7);
+        const weekStr = getStartOfWeek(d);
+        const formattedDate = `Week of ${d.toLocaleDateString("en-US", { month: "short", day: "numeric" })}`;
+        const isCompleted = completions.some(c => {
+          try {
+            return getStartOfWeek(new Date(c)) === weekStr;
+          } catch {
+            return false;
+          }
+        });
+        return { isCompleted, label: `W${8-i}`, formattedDate };
+      });
+
+      return (
+        <div className="space-y-1.5" id={`completion-history-${task.id}`}>
+          <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">
+            Last 8 Weeks
+          </p>
+          <div className="flex justify-between items-center gap-1 bg-zinc-50/50 dark:bg-zinc-950/20 p-2.5 rounded-2xl border border-[#F0EDE9] dark:border-zinc-800/40">
+            {items.map((item, i) => (
+              <div key={i} className="flex flex-col items-center gap-1 flex-1">
+                <span className="text-[9px] font-bold text-zinc-400 dark:text-zinc-500">{item.label}</span>
+                <div
+                  className={`w-4 h-4 rounded-[3px] transition-all duration-300 ${
+                    item.isCompleted
+                      ? "bg-emerald-500 dark:bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.3)]"
+                      : "bg-zinc-200 dark:bg-zinc-800"
+                  }`}
+                  title={`${item.formattedDate}: ${item.isCompleted ? "Completed" : "Missed"}`}
+                />
+              </div>
+            ))}
+          </div>
+        </div>
+      );
     }
-  };
-
-  const renderSparkline = (completions: string[] = []) => {
-    const thirtyDays = Array.from({ length: 30 }).map((_, i) => {
-      const d = new Date();
-      d.setDate(d.getDate() - (29 - i));
-      return d.toISOString().split('T')[0];
-    });
-    
-    const completionDates = (completions || []).map(c => {
-      try {
-        return new Date(c).toISOString().split('T')[0];
-      } catch {
-        return '';
-      }
-    });
-
-    return (
-      <div className="flex gap-0.5 items-end h-6 mt-1" id="sparkline-container">
-        {thirtyDays.map((dateStr, i) => {
-          const isCompleted = completionDates.includes(dateStr);
-          return (
-            <div
-              key={i}
-              id={`spark-bar-${i}`}
-              title={`${dateStr}: ${isCompleted ? 'Completed' : 'No completion'}`}
-              className={`w-2 rounded-[2px] transition-all hover:scale-y-125 ${
-                isCompleted 
-                  ? 'h-4 bg-emerald-500 dark:bg-emerald-400 shadow-[0_0_4px_rgba(16,185,129,0.3)]' 
-                  : 'h-1.5 bg-zinc-200 dark:bg-zinc-800'
-              }`}
-            />
-          );
-        })}
-      </div>
-    );
   };
 
   const renderHabitCard = (task: Task, type: "daily" | "weekly") => {
     const streak = type === "daily" ? getDailyStreak(task.completions) : getWeeklyStreak(task.completions);
-    const rate = getRecentCompletionRate(task.completions, type);
     const isCompleted = type === "daily" ? isCompletedToday(task) : isCompletedThisWeek(task);
 
     return (
@@ -221,41 +254,29 @@ export function HabitTracker({ tasks, onLogCompletion, onEdit, onDelete }: Habit
           </div>
         </div>
 
-        {/* Streak and Completion Rate stats */}
-        <div className="grid grid-cols-2 gap-4 py-2 border-y border-[#F7F5F2] dark:border-zinc-800/60">
-          <div className="flex items-center gap-2.5">
-            <div className={`p-2 rounded-2xl ${streak > 0 ? 'bg-orange-55/20 text-orange-600 dark:bg-orange-950/30 dark:text-orange-400' : 'bg-zinc-100 text-zinc-400 dark:bg-zinc-800'}`}>
-              <Flame className={`w-4 h-4 ${streak > 0 ? 'animate-pulse' : ''}`} />
+        {/* LeetCode-style Streak Panel */}
+        <div className="flex items-center justify-between p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-950/40 border border-[#F0EDE9] dark:border-zinc-800/40" id={`streak-panel-${task.id}`}>
+          <div className="flex items-center gap-3">
+            <div className={`p-2.5 rounded-xl ${streak > 0 ? 'bg-orange-500/10 text-orange-600 dark:text-orange-400' : 'bg-zinc-200/50 text-zinc-400 dark:bg-zinc-800/80'}`}>
+              <Flame className={`w-5 h-5 ${streak > 0 ? 'animate-pulse fill-orange-500/10' : ''}`} />
             </div>
             <div>
-              <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">Streak</p>
-              <p className="text-sm font-bold font-display text-zinc-850 dark:text-zinc-200">
-                {streak} {type === "daily" ? 'days' : 'weeks'}
+              <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">Current Streak</p>
+              <p className="text-sm font-extrabold text-[#2D2C2A] dark:text-zinc-200">
+                {streak} {type === "daily" ? (streak === 1 ? 'day' : 'days') : (streak === 1 ? 'week' : 'weeks')}
               </p>
             </div>
           </div>
-
-          <div className="flex items-center gap-2.5">
-            <div className={`p-2 rounded-2xl ${rate > 40 ? 'bg-emerald-55/20 text-emerald-600 dark:bg-emerald-950/30 dark:text-emerald-400' : 'bg-amber-55/20 text-amber-600 dark:bg-amber-950/30 dark:text-amber-400'}`}>
-              <Activity className="w-4 h-4" />
+          {streak > 0 && (
+            <div className="flex items-center gap-1 bg-amber-55/20 text-amber-700 dark:text-amber-400 px-2.5 py-1 rounded-full text-[10px] font-extrabold tracking-tight">
+              <Trophy className="w-3.5 h-3.5" />
+              <span>STREAK ACTIVE</span>
             </div>
-            <div>
-              <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">30d Rate</p>
-              <p className="text-sm font-bold font-display text-zinc-850 dark:text-zinc-200">
-                {rate}%
-              </p>
-            </div>
-          </div>
+          )}
         </div>
 
-        {/* Sparkline visualization */}
-        <div className="space-y-1.5">
-          <div className="flex justify-between items-center text-[10px] text-zinc-400 dark:text-zinc-500">
-            <span className="font-medium">30-Day Activity Sparkline</span>
-            <span className="font-mono">{task.completions?.length || 0} completions</span>
-          </div>
-          {renderSparkline(task.completions)}
-        </div>
+        {/* Beautiful visual history/sparkline strip */}
+        {renderCompletionHistory(task, type)}
 
         {/* Check-in Actions */}
         <div className="pt-2">
@@ -333,7 +354,7 @@ export function HabitTracker({ tasks, onLogCompletion, onEdit, onDelete }: Habit
           <div className="space-y-1">
             <h4 className="font-bold text-xs text-amber-800 dark:text-amber-400">Streak Compilers Guidelines</h4>
             <p className="text-[11px] leading-relaxed text-amber-700 dark:text-amber-500">
-              Transform standard chores into structural streaks by opening any task, choosing a <strong>Daily</strong> or <strong>Weekly</strong> cadence, and checking in. Your streak metrics and 30-day sparklines will populate automatically!
+              Transform standard chores into structural streaks by opening any task, choosing a <strong>Daily</strong> or <strong>Weekly</strong> cadence, and checking in. Your streak metrics will populate automatically!
             </p>
           </div>
         </div>

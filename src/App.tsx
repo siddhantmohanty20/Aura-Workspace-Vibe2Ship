@@ -291,7 +291,7 @@ export default function App() {
   };
 
   // Create or Update single task action
-  const handleSaveTask = async (taskData: any) => {
+  const handleSaveTask = async (taskData: any, skipPrioritize = false) => {
     try {
       let finalData = { ...taskData };
       const existingTaskObj = tasks.find(t => t.id === taskData.id);
@@ -306,9 +306,11 @@ export default function App() {
           finalData.scheduled_start = existingTaskObj.scheduled_start || null;
           finalData.scheduled_end = existingTaskObj.scheduled_end || null;
         }
+        finalData.original_deadline = existingTaskObj.original_deadline || existingTaskObj.deadline;
         finalData.calendarEventId = existingTaskObj.calendarEventId || null;
       } else {
         finalData.initial_deadline = taskData.deadline;
+        finalData.original_deadline = taskData.deadline;
         finalData.scheduled_start = null;
         finalData.scheduled_end = null;
         finalData.calendarEventId = null;
@@ -335,8 +337,10 @@ export default function App() {
         triggerAlert("success", taskData.id ? "Task updated." : "Task compiled.");
       }
 
-      // Automatically trigger the dynamic prioritization and scheduling flow on create/update
-      handleAiPrioritize(refreshedTasks);
+      // Automatically trigger the dynamic prioritization and scheduling flow on create/update unless skipped
+      if (!skipPrioritize) {
+        handleAiPrioritize(refreshedTasks);
+      }
     } catch (err) {
       console.error(err);
       triggerAlert("error", "Failed to save task. Schema verification mismatch.");
@@ -346,14 +350,40 @@ export default function App() {
   const handleLogHabitCompletion = async (task: Task) => {
     try {
       const nowStr = new Date().toISOString();
-      const currentCompletions = task.completions || [];
-      const updatedCompletions = [...currentCompletions, nowStr];
+      const isRecurring = task.recurrence && task.recurrence !== "none";
+      let completions = task.completions ? [...task.completions] : [];
+      let completed_at = nowStr;
+
+      const getStartOfWeekString = (d: Date) => {
+        const date = new Date(d);
+        const day = date.getDay();
+        const diff = date.getDate() - day;
+        return new Date(date.setDate(diff)).toISOString().split('T')[0];
+      };
+
+      if (isRecurring) {
+        const todayStr = nowStr.split('T')[0];
+        if (task.recurrence === "daily") {
+          const alreadyCompleted = completions.some(c => c.startsWith(todayStr));
+          if (!alreadyCompleted) {
+            completions.push(nowStr);
+          }
+        } else if (task.recurrence === "weekly") {
+          const currentWeekStr = getStartOfWeekString(new Date());
+          const alreadyCompleted = completions.some(c => getStartOfWeekString(new Date(c)) === currentWeekStr);
+          if (!alreadyCompleted) {
+            completions.push(nowStr);
+          }
+        }
+      } else {
+        completions.push(nowStr);
+      }
       
       const updatedFields: Task = {
         ...task,
-        completions: updatedCompletions,
+        completions: completions,
         status: "done" as const,
-        completed_at: nowStr,
+        completed_at: completed_at,
       };
 
       let calendarWarning = "";
@@ -387,9 +417,53 @@ export default function App() {
   const handleToggleComplete = async (task: Task) => {
     try {
       const newStatus = task.status === "done" ? "not_started" : "done";
-      let updatedFields: any = {
+      const isRecurring = task.recurrence && task.recurrence !== "none";
+      const nowStr = new Date().toISOString();
+      let completions = task.completions ? [...task.completions] : [];
+      let completed_at = task.completed_at;
+
+      const getStartOfWeekString = (d: Date) => {
+        const date = new Date(d);
+        const day = date.getDay();
+        const diff = date.getDate() - day;
+        return new Date(date.setDate(diff)).toISOString().split('T')[0];
+      };
+
+      if (newStatus === "done") {
+        completed_at = nowStr;
+        if (isRecurring) {
+          const todayStr = nowStr.split('T')[0];
+          if (task.recurrence === "daily") {
+            const alreadyCompleted = completions.some(c => c.startsWith(todayStr));
+            if (!alreadyCompleted) {
+              completions.push(nowStr);
+            }
+          } else if (task.recurrence === "weekly") {
+            const currentWeekStr = getStartOfWeekString(new Date());
+            const alreadyCompleted = completions.some(c => getStartOfWeekString(new Date(c)) === currentWeekStr);
+            if (!alreadyCompleted) {
+              completions.push(nowStr);
+            }
+          }
+        }
+      } else {
+        completed_at = null;
+        if (isRecurring) {
+          if (task.recurrence === "daily") {
+            const todayStr = nowStr.split('T')[0];
+            completions = completions.filter(c => !c.startsWith(todayStr));
+          } else if (task.recurrence === "weekly") {
+            const currentWeekStr = getStartOfWeekString(new Date());
+            completions = completions.filter(c => getStartOfWeekString(new Date(c)) !== currentWeekStr);
+          }
+        }
+      }
+
+      let updatedFields: Task = {
         ...task,
         status: newStatus,
+        completed_at,
+        completions,
       };
 
       let calendarWarning = "";
@@ -420,6 +494,30 @@ export default function App() {
     }
   };
 
+  // Internal task deletion (no user prompt, no local state update)
+  const executeDeleteTask = async (id: string): Promise<string | null> => {
+    const taskObj = tasks.find(t => t.id === id);
+    let calendarWarning = null;
+
+    if (isAuthenticated && taskObj?.calendarEventId) {
+      try {
+        await deleteCalendarEvent(taskObj.calendarEventId);
+      } catch (err: any) {
+        console.warn("Failed to delete Calendar event during task delete:", err);
+        calendarWarning = `Task "${taskObj?.title || id}" deleted, but failed to delete Google Calendar event.`;
+      }
+    }
+
+    try {
+      await deleteTaskFromFirestore(id);
+    } catch (dbErr) {
+      console.error("Failed to delete task from Firestore:", dbErr);
+      throw dbErr;
+    }
+
+    return calendarWarning;
+  };
+
   // Delete task
   const handleDeleteTask = async (id: string) => {
     const confirmed = await askConfirmation(
@@ -428,20 +526,8 @@ export default function App() {
     );
     if (!confirmed) return;
 
-    const taskObj = tasks.find(t => t.id === id);
-    let calendarWarning = "";
-
-    if (isAuthenticated && taskObj?.calendarEventId) {
-      try {
-        await deleteCalendarEvent(taskObj.calendarEventId);
-      } catch (err: any) {
-        console.warn("Failed to delete Calendar event during task delete:", err);
-        calendarWarning = "Task deleted, but failed to delete Google Calendar event.";
-      }
-    }
-
     try {
-      await deleteTaskFromFirestore(id);
+      const calendarWarning = await executeDeleteTask(id);
       setTasks(prev => prev.filter(t => t.id !== id));
       
       if (calendarWarning) {
@@ -477,17 +563,21 @@ export default function App() {
     let calendarWarning = "";
     const linkedTasks = tasks.filter(t => t.goal_id === id);
 
-    if (isAuthenticated) {
-      for (const t of linkedTasks) {
-        if (t.calendarEventId) {
-          try {
-            await deleteCalendarEvent(t.calendarEventId);
-          } catch (err: any) {
-            console.warn(`Failed to delete Calendar event for subtask "${t.title}":`, err);
-            calendarWarning = "Goal deleted, but some Google Calendar events could not be removed.";
-          }
+    // Call the exact same task-deletion logic for each linked sub-task (including removing Calendar events)
+    const warnings: string[] = [];
+    for (const t of linkedTasks) {
+      try {
+        const warning = await executeDeleteTask(t.id);
+        if (warning) {
+          warnings.push(warning);
         }
+      } catch (err) {
+        console.warn(`Failed to execute delete for subtask ${t.id}:`, err);
       }
+    }
+
+    if (warnings.length > 0) {
+      calendarWarning = "Goal deleted, but some Google Calendar events could not be removed.";
     }
 
     try {
@@ -531,31 +621,36 @@ export default function App() {
       const data = await response.json();
       const extractedTasks = data.tasks || [];
 
-      // 3. Create Task records for each sub-task linked to this Goal
+      // 3. Create Task records for each sub-task linked to this Goal using the manual task creation logic (handleSaveTask)
       for (const t of extractedTasks) {
-        let taskFields = {
-          title: t.title,
-          description: t.description,
-          deadline: t.deadline,
-          estimated_effort: t.estimated_effort,
-          goal_id: goalId,
-          status: "not_started" as const,
-          calendarEventId: null as string | null
-        };
-
-        if (isAuthenticated) {
-          try {
-            const syncResult = await syncTaskToGoogleCalendar(taskFields);
-            taskFields.calendarEventId = syncResult.calendarEventId;
-          } catch (syncErr) {
-            console.warn("Failed to sync sub-task to Google Calendar during decomposition:", syncErr);
-          }
+        // Ensure each sub-task has a valid deadline and estimated effort populated
+        let deadline = t.deadline;
+        if (!deadline || isNaN(Date.parse(deadline))) {
+          // If invalid or missing, default to 2 days from now at 12:00 PM
+          const defaultDate = new Date();
+          defaultDate.setDate(defaultDate.getDate() + 2);
+          defaultDate.setHours(12, 0, 0, 0);
+          deadline = defaultDate.toISOString();
+        }
+        
+        let estimated_effort = Number(t.estimated_effort);
+        if (!estimated_effort || isNaN(estimated_effort) || estimated_effort <= 0) {
+          estimated_effort = 60; // Default to 60 minutes (1 hour) if missing or invalid
         }
 
-        await saveTaskToFirestore(taskFields);
+        const taskFields = {
+          title: t.title,
+          description: t.description || "",
+          deadline: deadline,
+          estimated_effort: estimated_effort,
+          goal_id: goalId,
+          status: "not_started" as const,
+        };
+
+        await handleSaveTask(taskFields, true); // Skip prioritizing inside the loop to avoid concurrent API conflicts
       }
 
-      // 4. Reload goals and tasks
+      // 4. Reload goals & tasks to reflect the new state in React
       const refreshedGoals = await getGoalsFromFirestore();
       setGoals(refreshedGoals);
       const refreshedTasks = await getTasksFromFirestore();
@@ -563,7 +658,7 @@ export default function App() {
 
       triggerAlert("success", `AI broke down goal into ${extractedTasks.length} tasks! Scheduling with Aura...`);
 
-      // 5. Instantly prioritize and schedule the newly created tasks
+      // 5. Instantly prioritize and schedule all newly created tasks together exactly once at the end
       await handleAiPrioritize(refreshedTasks);
 
     } catch (err) {
@@ -664,7 +759,8 @@ export default function App() {
               ...t,
               status: "overdue" as const,
               replanned: true,
-              initial_deadline: t.initial_deadline || t.deadline
+              initial_deadline: t.initial_deadline || t.deadline,
+              original_deadline: t.original_deadline || t.deadline
             };
           }
         }
@@ -744,6 +840,7 @@ export default function App() {
         
         if (existingTask) {
           taskCopy.initial_deadline = existingTask.initial_deadline || existingTask.deadline;
+          taskCopy.original_deadline = existingTask.original_deadline || existingTask.deadline;
           if (existingTask.calendarEventId && !taskCopy.calendarEventId) {
             taskCopy.calendarEventId = existingTask.calendarEventId;
           }
@@ -752,6 +849,7 @@ export default function App() {
           }
         } else {
           taskCopy.initial_deadline = t.deadline;
+          taskCopy.original_deadline = t.deadline;
         }
 
         if (taskCopy.scheduled_end) {
@@ -848,6 +946,20 @@ export default function App() {
     setIsEmailModalOpen(true);
   };
 
+  // Helper to determine if task is scheduled for today
+  const isTodayTask = (t: Task) => {
+    try {
+      const todayStr = new Date().toISOString().split("T")[0];
+      const localTodayStr = new Date().toLocaleDateString('en-CA'); // YYYY-MM-DD in local time
+      const datesToCheck = [t.scheduled_start, t.scheduled_end, t.deadline].filter(Boolean) as string[];
+      return datesToCheck.some(d => d.startsWith(todayStr) || d.startsWith(localTodayStr));
+    } catch (e) {
+      return false;
+    }
+  };
+
+  const overdueCount = tasks.filter(t => t.status === "overdue" && t.status !== "done").length;
+
   // Filter lists
   const filteredTasks = tasks.filter(t => {
     if (activeFilter === "done") return t.status === "done";
@@ -856,10 +968,22 @@ export default function App() {
     return t.status !== "done"; // not_started, in_progress, overdue (if looking at active, might exclude done)
   });
 
-  // Sort: Overdue on top, then high priority descending
+  // Sort: Today tasks at top, other active tasks in middle, overdue tasks at bottom.
+  // Within each category, sort by priority_score descending (highest priority first).
   const sortedTasks = [...filteredTasks].sort((a, b) => {
-    if (a.status === "overdue" && b.status !== "overdue") return -1;
-    if (b.status === "overdue" && a.status !== "overdue") return 1;
+    const aOverdue = a.status === "overdue";
+    const bOverdue = b.status === "overdue";
+    const aToday = isTodayTask(a);
+    const bToday = isTodayTask(b);
+
+    if (aToday && !bToday) return -1;
+    if (!aToday && bToday) return 1;
+
+    // If neither is today, or both are today, group overdue at bottom
+    if (aOverdue && !bOverdue) return 1;
+    if (!aOverdue && bOverdue) return -1;
+
+    // Same group, sort by priority score descending
     return b.priority_score - a.priority_score;
   });
 
@@ -1011,13 +1135,18 @@ export default function App() {
                     </button>
                     <button
                       onClick={() => setActiveFilter("overdue")}
-                      className={`px-4 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
+                      className={`px-4 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer flex items-center gap-1.5 ${
                         activeFilter === "overdue"
                           ? "bg-[#F2D7D0] border border-[#8C4F4F]/20 text-rose-800 dark:text-rose-350 font-bold"
                           : "text-[#7A756E] hover:text-[#2D2C2A] dark:text-zinc-400"
                       }`}
                     >
-                      Alerts / Overdue
+                      <span>Alerts / Overdue</span>
+                      {overdueCount > 0 && (
+                        <span className="flex items-center justify-center min-w-[16px] h-4 text-[9px] font-extrabold bg-rose-600 text-white rounded-full px-1 shadow-xs animate-bounce" id="overdue-badge-count">
+                          {overdueCount}
+                        </span>
+                      )}
                     </button>
                     <button
                       onClick={() => setActiveFilter("done")}

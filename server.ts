@@ -1,5 +1,6 @@
 import express from "express";
 import path from "path";
+import fs from "fs";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
@@ -73,6 +74,42 @@ async function generateContentWithRetry(
 // API: Health probe
 app.get("/api/health", (req, res) => {
   res.json({ status: "ok" });
+});
+
+// API: Get Firebase Configuration from Secrets/Environment
+app.get("/api/firebase-config", (req, res) => {
+  let fallbackConfig: any = {};
+  const configPath = path.join(process.cwd(), "firebase-applet-config.json");
+  if (fs.existsSync(configPath)) {
+    try {
+      fallbackConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    } catch (e) {
+      console.warn("Error reading fallback firebase-applet-config.json:", e);
+    }
+  }
+
+  // Support full JSON string in environment variable, or individual fields
+  let envConfig: any = {};
+  if (process.env.FIREBASE_CONFIG) {
+    try {
+      envConfig = JSON.parse(process.env.FIREBASE_CONFIG);
+    } catch (e) {
+      console.warn("Error parsing FIREBASE_CONFIG env variable:", e);
+    }
+  }
+
+  const config = {
+    projectId: process.env.FIREBASE_PROJECT_ID || envConfig.projectId || fallbackConfig.projectId || "",
+    appId: process.env.FIREBASE_APP_ID || envConfig.appId || fallbackConfig.appId || "",
+    apiKey: process.env.FIREBASE_API_KEY || envConfig.apiKey || fallbackConfig.apiKey || "",
+    authDomain: process.env.FIREBASE_AUTH_DOMAIN || envConfig.authDomain || fallbackConfig.authDomain || "",
+    storageBucket: process.env.FIREBASE_STORAGE_BUCKET || envConfig.storageBucket || fallbackConfig.storageBucket || "",
+    messagingSenderId: process.env.FIREBASE_MESSAGING_SENDER_ID || envConfig.messagingSenderId || fallbackConfig.messagingSenderId || "",
+    measurementId: process.env.FIREBASE_MEASUREMENT_ID || envConfig.measurementId || fallbackConfig.measurementId || "",
+    firestoreDatabaseId: process.env.FIREBASE_DATABASE_ID || envConfig.firestoreDatabaseId || fallbackConfig.firestoreDatabaseId || fallbackConfig.databaseId || ""
+  };
+
+  res.json(config);
 });
 
 // API: Prioritize Tasks & Estimate Effort with Calendar Slot Assignment

@@ -216,35 +216,35 @@ export function TaskCard({
             </span>
           )}
 
-          <span className={`text-xs flex flex-col gap-1 opacity-70 ${isDone ? "text-zinc-400" : textClass}`} id={`task-time-info-${task.id}`}>
-            {task.scheduled_start && task.scheduled_end ? (
+          <span className={`text-xs flex flex-col gap-1 ${isDone ? "opacity-60 text-zinc-400" : "opacity-100 " + textClass}`} id={`task-time-info-${task.id}`}>
+            {task.status === "overdue" || task.replanned ? (
               <>
-                <span className="inline-flex items-center gap-1 font-medium text-[11px]" id={`task-scheduled-time-${task.id}`}>
-                  <Clock className="w-3.5 h-3.5 opacity-60" />
-                  Scheduled: {formatTimeRange(task.scheduled_start, task.scheduled_end)}
-                </span>
-                <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-[#D97757] dark:text-[#E88A6D]" id={`task-updated-deadline-${task.id}`}>
+                <span className="inline-flex items-center gap-1 text-[11px] font-medium opacity-75" id={`task-original-deadline-${task.id}`}>
                   <Calendar className="w-3.5 h-3.5 opacity-60" />
-                  Updated Deadline: {formatDeadline(task.scheduled_end)}
+                  Originally due: {formatDeadline(task.original_deadline || task.initial_deadline || task.deadline)}
                 </span>
-                {task.initial_deadline && task.initial_deadline !== task.scheduled_end && (
-                  <span className="inline-flex items-center gap-1 text-[10px] opacity-75 line-through decoration-zinc-400/80" id={`task-initial-deadline-${task.id}`}>
-                    <Calendar className="w-3.5 h-3.5 opacity-60" />
-                    Initial Deadline: {formatDeadline(task.initial_deadline)}
+                <span className="inline-flex items-center gap-1 text-[11px] font-bold text-rose-600 dark:text-rose-400 animate-pulse" id={`task-updated-deadline-${task.id}`}>
+                  <Calendar className="w-3.5 h-3.5 opacity-80" />
+                  Rescheduled to: {formatDeadline(task.deadline)}
+                </span>
+                {task.scheduled_start && task.scheduled_end && (
+                  <span className="inline-flex items-center gap-1 font-medium text-[10px] opacity-75" id={`task-scheduled-time-${task.id}`}>
+                    <Clock className="w-3 h-3 opacity-60" />
+                    Scheduled: {formatTimeRange(task.scheduled_start, task.scheduled_end)}
                   </span>
                 )}
               </>
             ) : (
-              <span className="flex flex-col gap-1" id={`task-deadline-only-${task.id}`}>
-                {task.initial_deadline && task.initial_deadline !== task.deadline ? (
+              <>
+                {task.scheduled_start && task.scheduled_end ? (
                   <>
-                    <span className="inline-flex items-center gap-1 font-semibold text-[11px] text-[#D97757] dark:text-[#E88A6D]" id={`task-updated-deadline-${task.id}`}>
-                      <Calendar className="w-3.5 h-3.5 opacity-60" />
-                      Updated Deadline: {formatDeadline(task.deadline)}
+                    <span className="inline-flex items-center gap-1 font-medium text-[11px]" id={`task-scheduled-time-${task.id}`}>
+                      <Clock className="w-3.5 h-3.5 opacity-60" />
+                      Scheduled: {formatTimeRange(task.scheduled_start, task.scheduled_end)}
                     </span>
-                    <span className="inline-flex items-center gap-1 text-[10px] opacity-75 line-through decoration-zinc-400/80" id={`task-initial-deadline-${task.id}`}>
+                    <span className="inline-flex items-center gap-1 text-[11px] font-semibold" id={`task-updated-deadline-${task.id}`}>
                       <Calendar className="w-3.5 h-3.5 opacity-60" />
-                      Initial Deadline: {formatDeadline(task.initial_deadline)}
+                      Deadline: {formatDeadline(task.scheduled_end)}
                     </span>
                   </>
                 ) : (
@@ -253,7 +253,7 @@ export function TaskCard({
                     Deadline: {formatDeadline(task.deadline)}
                   </span>
                 )}
-              </span>
+              </>
             )}
           </span>
         </div>

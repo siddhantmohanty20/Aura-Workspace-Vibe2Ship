@@ -1,7 +1,26 @@
 import { initializeApp } from "firebase/app";
 import { getAuth, signInWithPopup, GoogleAuthProvider, onAuthStateChanged, User } from "firebase/auth";
 import { getFirestore, doc, getDocFromServer } from "firebase/firestore";
-import firebaseConfig from "../firebase-applet-config.json";
+
+// Fetch Firebase Configuration synchronously from the backend API route
+function fetchFirebaseConfig(): any {
+  if (typeof window === "undefined" || typeof XMLHttpRequest === "undefined") {
+    return {};
+  }
+  try {
+    const xhr = new XMLHttpRequest();
+    xhr.open("GET", "/api/firebase-config", false); // Synchronous
+    xhr.send(null);
+    if (xhr.status === 200) {
+      return JSON.parse(xhr.responseText);
+    }
+  } catch (error) {
+    console.error("Failed to load Firebase configuration dynamically:", error);
+  }
+  return {};
+}
+
+const firebaseConfig = fetchFirebaseConfig();
 
 // Initialize Firebase App
 const app = initializeApp(firebaseConfig);

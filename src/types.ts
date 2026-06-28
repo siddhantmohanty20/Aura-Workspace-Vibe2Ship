@@ -19,6 +19,7 @@ export interface Task {
   scheduling_reason?: string;
   scheduling_warning?: string;
   initial_deadline?: string | null;
+  original_deadline?: string | null;
   replanned?: boolean | null;
   recurrence?: 'none' | 'daily' | 'weekly';
   completions?: string[];

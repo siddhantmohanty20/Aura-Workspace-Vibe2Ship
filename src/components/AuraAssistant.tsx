@@ -12,7 +12,8 @@ import {
   CornerDownLeft, 
   Volume2, 
   VolumeX, 
-  RefreshCw 
+  RefreshCw,
+  Minimize2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -24,6 +25,7 @@ interface AuraAssistantProps {
 }
 
 export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: AuraAssistantProps) {
+  const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<"text" | "live">("text");
   const [textMessages, setTextMessages] = useState<ChatMessage[]>([
     {
@@ -47,6 +49,32 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
   const recognitionRef = useRef<any>(null);
   const audioIntervalRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+
+  // Click outside listener to collapse
+  useEffect(() => {
+    function handleClickOutside(event: MouseEvent) {
+      if (containerRef.current && !containerRef.current.contains(event.target as Node)) {
+        setIsExpanded(false);
+      }
+    }
+    if (isExpanded) {
+      document.addEventListener("mousedown", handleClickOutside);
+    }
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+    };
+  }, [isExpanded]);
+
+  // Focus input when expanding
+  useEffect(() => {
+    if (isExpanded && activeTab === "text") {
+      setTimeout(() => {
+        inputRef.current?.focus();
+      }, 100);
+    }
+  }, [isExpanded, activeTab]);
 
   // Scroll to bottom on message
   useEffect(() => {
@@ -325,8 +353,68 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
     }
   };
 
+  if (!isExpanded) {
+    return (
+      <div 
+        ref={containerRef}
+        onClick={() => setIsExpanded(true)}
+        className="rounded-[24px] border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/70 dark:bg-zinc-900/40 shadow-sm hover:shadow-md hover:border-[#D97757]/40 transition-all duration-300 flex items-center justify-between p-3.5 cursor-pointer group"
+        id="aura-collapsed-launcher"
+      >
+        <div className="flex items-center gap-3 flex-1 min-w-0">
+          <div className="relative flex-shrink-0">
+            <div className="w-10 h-10 rounded-full bg-[#D97757]/10 dark:bg-zinc-800/80 flex items-center justify-center border border-[#D97757]/20 group-hover:scale-105 transition-transform duration-300">
+              <MessagesSquare className="w-5 h-5 text-[#D97757]" />
+            </div>
+            <div className="absolute -top-0.5 -right-0.5 w-3 h-3 bg-emerald-500 rounded-full border-2 border-white dark:border-zinc-900 animate-pulse" />
+          </div>
+          <div className="flex-1 min-w-0" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-center gap-1.5">
+              <h4 className="text-xs font-bold font-display text-[#2D2C2A] dark:text-zinc-200">
+                Aura Assistant
+              </h4>
+              <span className="text-[8px] uppercase font-mono tracking-widest text-zinc-500 font-bold bg-[#D4DBCB]/40 dark:bg-zinc-800/55 px-1.5 py-0.5 rounded">
+                Online
+              </span>
+            </div>
+            <input
+              type="text"
+              placeholder="Ask Aura anything or start typing..."
+              value=""
+              onChange={(e) => {
+                setInputText(e.target.value);
+                setIsExpanded(true);
+              }}
+              onFocus={() => {
+                setIsExpanded(true);
+              }}
+              className="w-full bg-transparent border-none p-0 text-xs text-zinc-450 dark:text-zinc-400 focus:outline-none mt-0.5 placeholder-zinc-400 dark:placeholder-zinc-500 truncate cursor-pointer"
+            />
+          </div>
+        </div>
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button 
+            className="p-2 rounded-xl bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:text-[#D97757] dark:hover:text-zinc-300 transition-all cursor-pointer"
+            title="Open Voice Chat"
+            onClick={(e) => {
+              e.stopPropagation();
+              setActiveTab("live");
+              setIsExpanded(true);
+            }}
+          >
+            <Mic className="w-4 h-4" />
+          </button>
+          <div className="p-2 rounded-xl bg-[#D97757]/10 text-[#D97757] font-bold text-xs flex items-center gap-1 group-hover:bg-[#D97757]/15 transition-all">
+            <span>Open</span>
+            <Sparkles className="w-3 h-3 animate-pulse" />
+          </div>
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="rounded-[28px] border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/70 dark:bg-zinc-900/40 shadow-sm flex flex-col h-[524px] overflow-hidden">
+    <div ref={containerRef} className="rounded-[28px] border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/70 dark:bg-zinc-900/40 shadow-sm flex flex-col h-[524px] overflow-hidden relative">
       {/* Tab Switcher Headers */}
       <div className="flex px-4 pt-3 border-b border-[#E8E4DF] dark:border-zinc-800/60 justify-between items-center bg-[#F7F5F2]/60 dark:bg-zinc-900/20 rounded-t-[28px]">
         <div className="flex gap-1.5">
@@ -356,9 +444,22 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
           </button>
         </div>
 
-        <span className="text-[9px] uppercase font-mono tracking-widest text-zinc-500 font-bold bg-[#D4DBCB]/40 dark:bg-zinc-800/55 px-2.5 py-1 rounded-full mb-2">
-          Co-Compiler
-        </span>
+        <div className="flex items-center gap-2 mb-2">
+          <span className="text-[9px] uppercase font-mono tracking-widest text-zinc-500 font-bold bg-[#D4DBCB]/40 dark:bg-zinc-800/55 px-2.5 py-1 rounded-full">
+            Co-Compiler
+          </span>
+          <button
+            onClick={(e) => {
+              e.stopPropagation();
+              setIsExpanded(false);
+            }}
+            className="p-1 rounded-lg text-zinc-400 hover:text-zinc-650 dark:hover:text-zinc-200 hover:bg-zinc-250/50 dark:hover:bg-zinc-800/50 transition-all cursor-pointer"
+            title="Minimize Chat"
+            id="aura-minimize-btn"
+          >
+            <Minimize2 className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* Main Container Area */}
@@ -413,6 +514,7 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
                 className="flex items-center gap-2 relative"
               >
                 <input
+                  ref={inputRef}
                   type="text"
                   placeholder="Ask Aura: 'Prioritize my day' or 'Draft a review mail'..."
                   value={inputText}
@@ -453,7 +555,7 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
 
                 <button
                   onClick={handleToggleLiveMode}
-                  className="px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-[#D97757] hover:bg-[#D97757]/90 active:scale-95 transition-all w-44 shadow-sm"
+                  className="px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-[#D97757] hover:bg-[#D97757]/90 active:scale-95 transition-all w-44 shadow-sm cursor-pointer"
                 >
                   Connect Dialogue
                 </button>
@@ -508,7 +610,7 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
 
                       <button
                         onClick={handleToggleLiveMode}
-                        className="px-4 py-1.5 rounded-xl text-[10px] font-bold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 transition-all shadow-sm"
+                        className="px-4 py-1.5 rounded-xl text-[10px] font-bold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 transition-all shadow-sm cursor-pointer"
                       >
                         Disconnect Stream
                       </button>
