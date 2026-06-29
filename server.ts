@@ -566,7 +566,7 @@ Current State of Workspace:
 - Active Goals: ${JSON.stringify(activeGoals.map((g: any) => g.title))}
 
 Capabilities & Action Triggers:
-You can direct the workspace to trigger physical actions on the user's behalf if they ask you to create a task, update/schedule an item on their calendar, or draft a Gmail.
+You can direct the workspace to trigger physical actions on the user's behalf if they ask you to create a task, update/schedule an item on their calendar, draft a Gmail, create a goal, or decompose a goal into subtasks.
 
 To perform an action, you must specify it in your JSON response under the "action" key.
 
@@ -574,7 +574,7 @@ You MUST respond formatted in structured JSON matching this exact schema:
 {
   "text": "Your elegant, conversational markdown response here explaining what you did.",
   "action": null | {
-    "type": "create_task" | "create_calendar_event" | "create_gmail_draft",
+    "type": "create_task" | "create_calendar_event" | "create_gmail_draft" | "create_goal" | "decompose_goal",
     "params": {
       // If "create_task":
       "title": "string",
@@ -592,6 +592,12 @@ You MUST respond formatted in structured JSON matching this exact schema:
       "to": "string (recipient email)",
       "subject": "string",
       "bodyText": "string (the plain text body)"
+
+      // OR if "create_goal":
+      "title": "string (the title of the goal)"
+
+      // OR if "decompose_goal" (this automatically creates the goal and then decomposes it into scheduled sub-tasks):
+      "title": "string (the title of the goal)"
     }
   }
 }

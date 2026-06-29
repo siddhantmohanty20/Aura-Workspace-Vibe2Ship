@@ -138,14 +138,23 @@ export function CreateEditTaskModal({
     }
 
     let finalIsoString = "";
+    let intermediateDate: Date;
     if (deadline.includes('T')) {
       const [datePart, timePart] = deadline.split('T');
       const [year, month, day] = datePart.split('-').map(Number);
       const [hours, minutes] = timePart.split(':').map(Number);
-      finalIsoString = new Date(year, month - 1, day, hours, minutes).toISOString();
+      intermediateDate = new Date(year, month - 1, day, hours, minutes);
+      finalIsoString = intermediateDate.toISOString();
     } else {
-      finalIsoString = new Date(deadline).toISOString();
+      intermediateDate = new Date(deadline);
+      finalIsoString = intermediateDate.toISOString();
     }
+
+    console.log(`[DEBUG deadline parsing]
+      (1) Raw picker value: ${deadline}
+      (2) Timezone offset (minutes): ${new Date().getTimezoneOffset()}
+      (3) Intermediate Date object: ${intermediateDate.toString()}
+      (4) Final stored UTC ISO string: ${finalIsoString}`);
 
     onSave({
       id: task?.id,

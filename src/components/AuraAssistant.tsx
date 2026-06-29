@@ -22,9 +22,11 @@ interface AuraAssistantProps {
   goals: Goal[];
   onRefreshTasks: () => void;
   onSaveTask?: (taskData: any) => Promise<void>;
+  onCreateGoal?: (title: string) => Promise<void>;
+  onDecomposeGoal?: (title: string) => Promise<void>;
 }
 
-export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: AuraAssistantProps) {
+export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCreateGoal, onDecomposeGoal }: AuraAssistantProps) {
   const [isExpanded, setIsExpanded] = useState(false);
   const [activeTab, setActiveTab] = useState<"text" | "live">("text");
   const [textMessages, setTextMessages] = useState<ChatMessage[]>([
@@ -179,6 +181,10 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
               data.action.params.subject,
               data.action.params.bodyText
             );
+          } else if (data.action.type === "create_goal" && onCreateGoal) {
+            await onCreateGoal(data.action.params.title);
+          } else if (data.action.type === "decompose_goal" && onDecomposeGoal) {
+            await onDecomposeGoal(data.action.params.title);
           }
         } catch (actErr) {
           console.error("Workspace action execution failure:", actErr);
@@ -309,6 +315,10 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
                 data.action.params.subject,
                 data.action.params.bodyText
               );
+            } else if (data.action.type === "create_goal" && onCreateGoal) {
+              await onCreateGoal(data.action.params.title);
+            } else if (data.action.type === "decompose_goal" && onDecomposeGoal) {
+              await onDecomposeGoal(data.action.params.title);
             }
           } catch (actErr) {
             console.error("Workspace voice action execution failure:", actErr);

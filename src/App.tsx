@@ -893,7 +893,7 @@ export default function App() {
         console.log("Aura Workspace Autocure: Detected missed deadlines. Triggering silent re-planning...");
         
         for (const overdueTask of overdueTasksForDraft) {
-          addReasoning(`Missed and re-planned task: "${overdueTask.title}"`);
+          console.log(`Missed and re-planned task: "${overdueTask.title}"`);
           if (hasEmailIntent(overdueTask.title, overdueTask.description || "")) {
             try {
               const subject = `Delay Update: ${overdueTask.title}`;
@@ -1494,6 +1494,8 @@ export default function App() {
                     goals={goals}
                     onRefreshTasks={loadWorkspaceData}
                     onSaveTask={handleSaveTask}
+                    onCreateGoal={handleCreateGoal}
+                    onDecomposeGoal={handleDecomposeGoal}
                   />
                 </div>
               </div>
