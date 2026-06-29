@@ -1,31 +1,8 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-
-    // Helper functions for attribute-based access control
-    function isAuthenticated() {
-      return request.auth != null;
-    }
-
-    // Default deny catch-all for ultimate safety
     match /{document=**} {
-      allow read, write: if false;
-    }
-
-    // Explicitly allow connection checking without authentication
-    match /test/connection {
-      allow read: if true;
-    }
-
-    // Dynamic, secure rule for all user collections (tasks, goals, notes, etc.)
-    match /{collectionId}/{docId} {
-      // Allow reading and writing only if the user is authenticated AND:
-      // - For existing documents (reads, updates, deletes): the stored userId matches the authenticated user ID
-      // - For new documents (creates): the incoming userId matches the authenticated user ID
-      allow read, write: if isAuthenticated() && (
-        (resource == null && request.resource != null && request.resource.data.userId == request.auth.uid) ||
-        (resource != null && resource.data.userId == request.auth.uid && (request.resource == null || request.resource.data.userId == request.auth.uid))
-      );
+      allow read, write: if request.auth != null;
     }
   }
 }

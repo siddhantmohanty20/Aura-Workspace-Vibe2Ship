@@ -37,7 +37,7 @@ async function generateContentWithRetry(
   maxRetries = 2
 ): Promise<any> {
   let lastError: any = null;
-  const models = [params.model || "gemini-3.5-flash", "gemini-3.1-flash-lite"];
+  const models = [params.model || "gemini-2.5-flash", "gemini-3.1-flash-lite"];
 
   for (const model of models) {
     let attempt = 0;
@@ -90,7 +90,7 @@ app.get("/api/firebase-config", (req, res) => {
 
   // Support full JSON string in environment variable, or individual fields
   let envConfig: any = {};
-  if (process.env.FIREBASE_CONFIG) {
+  if (process.env.FIREBASE_CONFIG && process.env.FIREBASE_CONFIG.trim().startsWith('{')) {
     try {
       envConfig = JSON.parse(process.env.FIREBASE_CONFIG);
     } catch (e) {
@@ -201,17 +201,10 @@ app.post("/api/prioritize", async (req, res) => {
       let calculatedStatus = t.status;
       
       if (t.status !== "done") {
-        if (t.scheduled_end) {
-          const end = new Date(t.scheduled_end);
-          if (now.getTime() >= end.getTime()) {
-            calculatedStatus = "overdue";
-          }
-        } else {
-          if (deadlineDate.getTime() < now.getTime()) {
-            calculatedStatus = "overdue";
-          } else if (t.status === "overdue") {
-            calculatedStatus = "not_started";
-          }
+        if (deadlineDate.getTime() < now.getTime()) {
+          calculatedStatus = "overdue";
+        } else if (t.status === "overdue") {
+          calculatedStatus = "not_started";
         }
       }
 
@@ -358,8 +351,8 @@ Please perform the following optimizations for each task:
 
 3. DETECT OVERDUE:
    - If the task is completed ("done"), keep it as "done".
-   - If the task has a previously scheduled end time (scheduled_end) and its end time has fully passed (is on or before ${now.toISOString()}) and is not "done", set status to "overdue".
-   - If the task has no previously scheduled end time, and its deadline has fully passed (is on or before ${now.toISOString()}) and is not "done", set status to "overdue".
+   - If the task's deadline has fully passed (is on or before ${now.toISOString()}) and is not "done", set status to "overdue".
+   - Scheduled start/end times passing have NO impact on overdue classification.
    - Otherwise, preserve its current status.
 
 4. ALLOCATE CALENDAR SLOTS (SCHEDULING):
@@ -378,7 +371,7 @@ Format your output STRICTLY as a JSON object containing a "tasks" list matching 
 `;
 
     const response = await generateContentWithRetry(aiClient, {
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -518,7 +511,7 @@ For each extracted task, provide:
     }
 
     const response = await generateContentWithRetry(aiClient, {
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -554,13 +547,14 @@ For each extracted task, provide:
 
 // API: Active chat interface
 app.post("/api/chat", async (req, res) => {
-  const { messages = [], activeTasks = [], activeGoals = [] } = req.body;
-  const currentNow = new Date();
+  const { messages = [], activeTasks = [], activeGoals = [], currentTimeStr, timeZone } = req.body;
+  const currentNow = currentTimeStr ? new Date(currentTimeStr) : new Date();
+  const tz = timeZone || "UTC";
 
   const systemInstruction = `
 You are Aura, an elite, minimalist AI productivity partner built directly into the Aura Workspace.
-The current reference time in UTC is exactly: ${currentNow.toISOString()}.
-Today is ${currentNow.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}, ${currentNow.getUTCFullYear()}-${String(currentNow.getUTCMonth()+1).padStart(2,'0')}-${String(currentNow.getUTCDate()).padStart(2,'0')}.
+The current reference time is exactly: ${currentNow.toISOString()}.
+Today is ${currentNow.toLocaleDateString('en-US', { weekday: 'long', timeZone: tz })}, ${currentNow.toLocaleDateString('en-US', { timeZone: tz })} in the user's timezone (${tz}).
 
 Style Guidelines:
 - Express yourself with elegant, concise, clear, and reassuring vocabulary. Avoid excessive emoji usage (1 or 2 is fine for accentuation, keep them professional).
@@ -621,7 +615,7 @@ Do not output any wrappers, markdown blocks, or commentary outside of the valid 
     }));
 
     const response = await generateContentWithRetry(aiClient, {
-      model: "gemini-3.5-flash",
+      model: "gemini-2.5-flash",
       contents: contents,
       config: {
         systemInstruction: systemInstruction,

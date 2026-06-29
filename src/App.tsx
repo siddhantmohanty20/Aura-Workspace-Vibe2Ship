@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { Task, Goal, Note } from "./types";
 import { 
   initAuth, 
@@ -13,6 +13,7 @@ import {
   saveGoalToFirestore,
   deleteTaskFromFirestore,
   deleteGoalFromFirestore,
+  updateGoalStatusInFirestore,
   triggerAiPrioritization,
   getNotesFromFirestore,
   saveNoteToFirestore,
@@ -32,7 +33,7 @@ import { CalendarManager } from "./components/CalendarManager";
 import { GmailDraftModal } from "./components/GmailDraftModal";
 import { AuraAssistant } from "./components/AuraAssistant";
 import { NotesManager } from "./components/NotesManager";
-import { HabitTracker } from "./components/HabitTracker";
+import { HabitTracker, getDailyStreak, getWeeklyStreak } from "./components/HabitTracker";
 import { 
   Plus, 
   Sparkles, 
@@ -46,9 +47,32 @@ import {
   Sun,
   LayoutGrid,
   TrendingUp,
-  Inbox
+  Inbox,
+  FolderArchive,
+  RotateCcw
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
+
+function TaskCardSkeleton() {
+  return (
+    <div className="animate-pulse rounded-[22px] border border-[#E8E4DF] dark:border-zinc-800 bg-white/50 dark:bg-zinc-900/20 p-4 space-y-3.5">
+      <div className="flex items-start justify-between gap-3">
+        <div className="flex items-start gap-3 flex-1 animate-pulse">
+          <div className="w-5.5 h-5.5 rounded-full bg-zinc-200 dark:bg-zinc-800 shrink-0" />
+          <div className="flex-1 space-y-2">
+            <div className="h-4 bg-zinc-200 dark:bg-zinc-800 rounded-md w-3/4" />
+            <div className="h-3 bg-zinc-200 dark:bg-zinc-800 rounded-md w-1/2" />
+          </div>
+        </div>
+        <div className="w-10 h-10 rounded-xl bg-zinc-200 dark:bg-zinc-800 shrink-0" />
+      </div>
+      <div className="border-t border-[#E8E4DF] dark:border-zinc-800/60 pt-2.5 flex justify-between items-center animate-pulse">
+        <div className="h-3 bg-zinc-200 dark:bg-zinc-800 rounded-md w-1/3" />
+        <div className="h-3 bg-zinc-200 dark:bg-zinc-800 rounded-md w-1/4" />
+      </div>
+    </div>
+  );
+}
 
 export default function App() {
   const [isAuthenticated, setIsAuthenticated] = useState(false);
@@ -57,9 +81,17 @@ export default function App() {
 
   // Dynamic Workspace States
   const [tasks, setTasks] = useState<Task[]>([]);
+  const tasksRef = useRef(tasks);
+  useEffect(() => {
+    tasksRef.current = tasks;
+  }, [tasks]);
   const [goals, setGoals] = useState<Goal[]>([]);
+  const goalsRef = useRef(goals);
+  useEffect(() => {
+    goalsRef.current = goals;
+  }, [goals]);
   const [notes, setNotes] = useState<Note[]>([]);
-  const [loadingData, setLoadingData] = useState(false);
+  const [loadingData, setLoadingData] = useState(true);
   const [isCompilingPriority, setIsCompilingPriority] = useState(false);
 
   // Filters
@@ -138,6 +170,32 @@ export default function App() {
       loadWorkspaceData();
     }
   }, [isAuthenticated, user]);
+
+  // Expose a manual reset function to the window for one-time manual cleanup via browser console
+  useEffect(() => {
+    (window as any).runManualDeadlineReset = async () => {
+      console.log("Starting manual reset of original_deadline...");
+      try {
+        let updatedCount = 0;
+        const allTasks = await getTasksFromFirestore();
+        for (const t of allTasks) {
+          if (t.original_deadline !== null && t.original_deadline !== undefined) {
+            console.log(`Resetting task: ${t.title}`);
+            await saveTaskToFirestore({ ...t, original_deadline: null as any });
+            updatedCount++;
+          }
+        }
+        console.log(`Manual reset complete. Updated ${updatedCount} tasks.`);
+        // Reload workspace data to reflect changes
+        loadWorkspaceData();
+      } catch (err) {
+        console.error("Failed to run manual reset:", err);
+      }
+    };
+    return () => {
+      delete (window as any).runManualDeadlineReset;
+    };
+  }, []);
 
   const loadWorkspaceData = async () => {
     setLoadingData(true);
@@ -227,16 +285,16 @@ export default function App() {
   };
 
   // Helper to sync single task with Google Calendar and return updated calendarEventId (or null)
-  // If API call fails, we trigger a warning alert, but still let the task save locally.
-  const syncTaskToGoogleCalendar = async (taskData: any, existingTaskObj?: Task): Promise<{ calendarEventId: string | null; warning?: string }> => {
+  // If API call fails, we throw an error so the caller can abort the Firestore update.
+  const syncTaskToGoogleCalendar = async (taskData: any, existingTaskObj?: Task): Promise<{ calendarEventId: string | null }> => {
     // 1. If task is already "done", we should not create or keep any Calendar event
-    if (taskData.status === "done") {
+    if (taskData.status === "done" || taskData.status === "archived") {
       if (existingTaskObj?.calendarEventId) {
         try {
           await deleteCalendarEvent(existingTaskObj.calendarEventId);
         } catch (err: any) {
-          console.warn("Failed to delete complete task's calendar event:", err);
-          return { calendarEventId: null, warning: "Task saved, but couldn't remove event from Google Calendar." };
+          console.warn("Failed to delete complete/archived task's calendar event:", err);
+          throw new Error("Failed to remove event from Google Calendar.");
         }
       }
       return { calendarEventId: null };
@@ -249,7 +307,7 @@ export default function App() {
           await deleteCalendarEvent(existingTaskObj.calendarEventId);
         } catch (err: any) {
           console.warn("Failed to delete removed-deadline calendar event:", err);
-          return { calendarEventId: null, warning: "Task saved, but previous Calendar event couldn't be deleted." };
+          throw new Error("Previous Calendar event couldn't be deleted.");
         }
       }
       return { calendarEventId: null };
@@ -257,9 +315,9 @@ export default function App() {
 
     // 3. Task has a deadline. Create or update calendar event
     try {
-      const startTime = taskData.scheduled_start ? new Date(taskData.scheduled_start) : new Date(taskData.deadline);
       const durationMin = taskData.estimated_effort > 0 ? taskData.estimated_effort : 60;
-      const endTime = taskData.scheduled_end ? new Date(taskData.scheduled_end) : new Date(startTime.getTime() + durationMin * 60 * 1000);
+      const endTime = taskData.scheduled_end ? new Date(taskData.scheduled_end) : new Date(taskData.deadline);
+      const startTime = taskData.scheduled_start ? new Date(taskData.scheduled_start) : new Date(endTime.getTime() - durationMin * 60 * 1000);
 
       const eventData = {
         summary: taskData.title,
@@ -283,10 +341,7 @@ export default function App() {
       }
     } catch (err: any) {
       console.error("Calendar sync error:", err);
-      return { 
-        calendarEventId: existingTaskObj?.calendarEventId || null, 
-        warning: `Task saved, but Google Calendar sync failed: ${err.message || 'Check connection'}` 
-      };
+      throw new Error(`Google Calendar sync failed: ${err.message || 'Check connection'}`);
     }
   };
 
@@ -306,23 +361,18 @@ export default function App() {
           finalData.scheduled_start = existingTaskObj.scheduled_start || null;
           finalData.scheduled_end = existingTaskObj.scheduled_end || null;
         }
-        finalData.original_deadline = existingTaskObj.original_deadline || existingTaskObj.deadline;
+        finalData.original_deadline = existingTaskObj.original_deadline;
         finalData.calendarEventId = existingTaskObj.calendarEventId || null;
       } else {
         finalData.initial_deadline = taskData.deadline;
-        finalData.original_deadline = taskData.deadline;
         finalData.scheduled_start = null;
         finalData.scheduled_end = null;
         finalData.calendarEventId = null;
       }
 
-      let calendarWarning = "";
       if (isAuthenticated) {
         const syncResult = await syncTaskToGoogleCalendar(finalData, existingTaskObj);
         finalData.calendarEventId = syncResult.calendarEventId;
-        if (syncResult.warning) {
-          calendarWarning = syncResult.warning;
-        }
       }
 
       await saveTaskToFirestore(finalData);
@@ -331,19 +381,15 @@ export default function App() {
       const refreshedTasks = await getTasksFromFirestore();
       setTasks(refreshedTasks);
       
-      if (calendarWarning) {
-        triggerAlert("error", calendarWarning);
-      } else {
-        triggerAlert("success", taskData.id ? "Task updated." : "Task compiled.");
-      }
+      triggerAlert("success", taskData.id ? "Task updated." : "Task compiled.");
 
       // Automatically trigger the dynamic prioritization and scheduling flow on create/update unless skipped
       if (!skipPrioritize) {
         handleAiPrioritize(refreshedTasks);
       }
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      triggerAlert("error", "Failed to save task. Schema verification mismatch.");
+      triggerAlert("error", err.message || "Failed to save task. Schema verification mismatch.");
     }
   };
 
@@ -379,20 +425,23 @@ export default function App() {
         completions.push(nowStr);
       }
       
-      const updatedFields: Task = {
+      let updatedFields: Task = {
         ...task,
         completions: completions,
         status: "done" as const,
         completed_at: completed_at,
       };
+      
+      if (isRecurring) {
+        const todayStr = nowStr.split('T')[0];
+        updatedFields.recent_status_log = { ...(task.recent_status_log || {}), [todayStr]: 'completed' };
+        const newStreak = task.recurrence === "daily" ? getDailyStreak(completions) : getWeeklyStreak(completions);
+        updatedFields.max_streak = Math.max(task.max_streak || 0, newStreak);
+      }
 
-      let calendarWarning = "";
       if (isAuthenticated) {
         const syncResult = await syncTaskToGoogleCalendar(updatedFields, task);
         updatedFields.calendarEventId = syncResult.calendarEventId;
-        if (syncResult.warning) {
-          calendarWarning = syncResult.warning;
-        }
       }
 
       await saveTaskToFirestore(updatedFields);
@@ -400,23 +449,20 @@ export default function App() {
       const refreshed = await getTasksFromFirestore();
       setTasks(refreshed);
 
-      if (calendarWarning) {
-        triggerAlert("error", calendarWarning);
-      } else {
-        triggerAlert("success", `Habit completion logged for "${task.title}"!`);
-      }
+      triggerAlert("success", `Habit completion logged for "${task.title}"!`);
 
       handleAiPrioritize(refreshed);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      triggerAlert("error", "Error logging habit completion.");
+      triggerAlert("error", err.message || "Error logging habit completion.");
     }
   };
 
-  // Toggle state between active <-> done
+  // Toggle state between active <-> done (or restore archived)
   const handleToggleComplete = async (task: Task) => {
     try {
-      const newStatus = task.status === "done" ? "not_started" : "done";
+      // If done or archived, restore to not_started
+      const newStatus = (task.status === "done" || task.status === "archived") ? "not_started" : "done";
       const isRecurring = task.recurrence && task.recurrence !== "none";
       const nowStr = new Date().toISOString();
       let completions = task.completions ? [...task.completions] : [];
@@ -465,14 +511,24 @@ export default function App() {
         completed_at,
         completions,
       };
+      
+      if (isRecurring) {
+        const todayStr = nowStr.split('T')[0];
+        let new_recent_status_log = { ...(task.recent_status_log || {}) };
+        if (newStatus === "done") {
+          new_recent_status_log[todayStr] = 'completed';
+        } else {
+          delete new_recent_status_log[todayStr];
+        }
+        updatedFields.recent_status_log = new_recent_status_log;
+        
+        const newStreak = task.recurrence === "daily" ? getDailyStreak(completions) : getWeeklyStreak(completions);
+        updatedFields.max_streak = Math.max(task.max_streak || 0, newStreak);
+      }
 
-      let calendarWarning = "";
       if (isAuthenticated) {
         const syncResult = await syncTaskToGoogleCalendar(updatedFields, task);
         updatedFields.calendarEventId = syncResult.calendarEventId;
-        if (syncResult.warning) {
-          calendarWarning = syncResult.warning;
-        }
       }
 
       await saveTaskToFirestore(updatedFields);
@@ -480,17 +536,13 @@ export default function App() {
       const refreshed = await getTasksFromFirestore();
       setTasks(refreshed);
       
-      if (calendarWarning) {
-        triggerAlert("error", calendarWarning);
-      } else {
-        triggerAlert("success", newStatus === "done" ? "Task checked off!" : "Task reactivated.");
-      }
+      triggerAlert("success", newStatus === "done" ? "Task checked off!" : "Task reactivated.");
 
       // Trigger re-scheduling and prioritization when completeness changes
       handleAiPrioritize(refreshed);
-    } catch (err) {
+    } catch (err: any) {
       console.error(err);
-      triggerAlert("error", "Error mapping complete states in database.");
+      triggerAlert("error", err.message || "Error mapping complete states in database.");
     }
   };
 
@@ -521,14 +573,14 @@ export default function App() {
   // Delete task
   const handleDeleteTask = async (id: string) => {
     const confirmed = await askConfirmation(
-      "Delete Task",
-      "Are you sure you want to permanently delete this task? This action cannot be undone and will remove it from Google Calendar if synced."
+      "Archive Task",
+      "Are you sure you want to archive this task? It will be moved to Archive Logs and removed from Google Calendar."
     );
     if (!confirmed) return;
 
     try {
       const calendarWarning = await executeDeleteTask(id);
-      setTasks(prev => prev.filter(t => t.id !== id));
+      setTasks(prev => prev.map(t => t.id === id ? { ...t, status: "archived", calendarEventId: null } : t));
       
       if (calendarWarning) {
         triggerAlert("error", calendarWarning);
@@ -552,16 +604,16 @@ export default function App() {
     }
   };
 
-  // Delete Goal (cascades tasks that are linked to null)
+  // Delete Goal (Archive)
   const handleDeleteGoal = async (id: string) => {
     const confirmed = await askConfirmation(
-      "Delete Milestone Goal",
-      "Are you sure you want to delete this Goal?\n\nThis will also permanently delete all associated subtasks from your database and Google Calendar. Proceed?"
+      "Archive Milestone Goal",
+      "Are you sure you want to archive this Goal?\n\nThis will also archive all associated subtasks and remove them from your Google Calendar. Proceed?"
     );
     if (!confirmed) return;
 
     let calendarWarning = "";
-    const linkedTasks = tasks.filter(t => t.goal_id === id);
+    const linkedTasks = tasks.filter(t => t.goal_id === id && t.status !== "archived");
 
     // Call the exact same task-deletion logic for each linked sub-task (including removing Calendar events)
     const warnings: string[] = [];
@@ -594,6 +646,67 @@ export default function App() {
       }
     } catch {
       triggerAlert("error", "Error compiling drop goal instruction.");
+    }
+  };
+
+  // Restore Task
+  const handleRestoreTask = async (id: string) => {
+    try {
+      const task = tasks.find(t => t.id === id);
+      if (!task) return;
+
+      const updatedFields: Task = { ...task, status: "not_started" };
+      
+      if (isAuthenticated) {
+        const syncResult = await syncTaskToGoogleCalendar(updatedFields, task);
+        updatedFields.calendarEventId = syncResult.calendarEventId;
+      }
+
+      await saveTaskToFirestore(updatedFields);
+      
+      const refreshedTasks = await getTasksFromFirestore();
+      setTasks(refreshedTasks);
+      
+      triggerAlert("success", "Task restored successfully.");
+      
+      handleAiPrioritize(refreshedTasks);
+    } catch (err: any) {
+      console.error(err);
+      triggerAlert("error", err.message || "Error restoring task.");
+    }
+  };
+
+  // Restore Goal
+  const handleRestoreGoal = async (id: string) => {
+    try {
+      // Restore goal
+      await updateGoalStatusInFirestore(id, "active");
+
+      // Restore archived subtasks
+      const linkedTasks = tasks.filter(t => t.goal_id === id && t.status === "archived");
+      for (const t of linkedTasks) {
+        const updatedFields: Task = { ...t, status: "not_started" };
+        if (isAuthenticated) {
+          try {
+            const syncResult = await syncTaskToGoogleCalendar(updatedFields, t);
+            updatedFields.calendarEventId = syncResult.calendarEventId;
+          } catch (err: any) {
+            console.warn(`Failed to sync task ${t.id} on restore:`, err);
+            throw new Error(`Google Calendar sync failed for subtask: ${err.message}`);
+          }
+        }
+        await saveTaskToFirestore(updatedFields);
+      }
+
+      const refreshedGoals = await getGoalsFromFirestore();
+      const refreshedTasks = await getTasksFromFirestore();
+      setGoals(refreshedGoals);
+      setTasks(refreshedTasks);
+      triggerAlert("success", "Goal and associated subtasks restored successfully.");
+      handleAiPrioritize(refreshedTasks);
+    } catch (err: any) {
+      console.error(err);
+      triggerAlert("error", err.message || "Error restoring goal.");
     }
   };
 
@@ -716,8 +829,9 @@ export default function App() {
           try {
             const syncResult = await syncTaskToGoogleCalendar(taskFields);
             taskFields.calendarEventId = syncResult.calendarEventId;
-          } catch (syncErr) {
+          } catch (syncErr: any) {
             console.warn("Failed to sync extracted task to Google Calendar:", syncErr);
+            throw new Error(`Google Calendar sync failed for extracted task: ${syncErr.message}`);
           }
         }
 
@@ -738,7 +852,7 @@ export default function App() {
 
   // Overdue check and automatic silent re-planning loop
   useEffect(() => {
-    if (!isAuthenticated || tasks.length === 0 || isCompilingPriority) return;
+    if (!isAuthenticated || isCompilingPriority) return;
 
     const hasEmailIntent = (title: string, desc: string) => {
       const text = (title + " " + (desc || "")).toLowerCase();
@@ -746,20 +860,28 @@ export default function App() {
     };
 
     const checkAndReplanOverdueTasks = async () => {
+      const currentTasks = tasksRef.current;
+      if (!currentTasks || currentTasks.length === 0) return;
+
       const now = new Date();
+      
+      console.log(`[DEBUG checkAndReplan] now.getTime(): ${now.getTime()}, currentTasks.length: ${currentTasks.length}`);
+      currentTasks.forEach(t => {
+        const deadlineTime = new Date(t.deadline).getTime();
+        console.log(`[DEBUG checkAndReplan] Task: "${t.title}", deadline: ${t.deadline}, deadlineTime: ${deadlineTime}, isOverdue: ${now.getTime() > deadlineTime}, status: ${t.status}`);
+      });
+
       let hasOverdueToReplan = false;
       const overdueTasksForDraft: Task[] = [];
-      const tasksWithReplannedFlag = tasks.map(t => {
-        if (t.status !== "done" && t.scheduled_end) {
-          const endTime = new Date(t.scheduled_end);
-          if (now.getTime() > endTime.getTime() && t.status !== "overdue") {
+      const tasksWithMissedDeadlines = currentTasks.map(t => {
+        if (t.status !== "done") {
+          const deadlineTime = new Date(t.deadline).getTime();
+          if (now.getTime() > deadlineTime) {
             hasOverdueToReplan = true;
             overdueTasksForDraft.push(t);
             return {
               ...t,
-              status: "overdue" as const,
-              replanned: true,
-              initial_deadline: t.initial_deadline || t.deadline,
+              // If this is the first time it's missed, capture the current deadline as original_deadline
               original_deadline: t.original_deadline || t.deadline
             };
           }
@@ -768,10 +890,10 @@ export default function App() {
       });
 
       if (hasOverdueToReplan) {
-        console.log("Aura Workspace Autocure: Detected missed schedule blocks. Triggering silent re-planning...");
-        triggerAlert("error", "Aura: Missed schedule blocks detected. Auto-healing calendar...");
+        console.log("Aura Workspace Autocure: Detected missed deadlines. Triggering silent re-planning...");
         
         for (const overdueTask of overdueTasksForDraft) {
+          addReasoning(`Missed and re-planned task: "${overdueTask.title}"`);
           if (hasEmailIntent(overdueTask.title, overdueTask.description || "")) {
             try {
               const subject = `Delay Update: ${overdueTask.title}`;
@@ -798,7 +920,7 @@ export default function App() {
         }
 
         // Trigger silent prioritization/scheduling with the marked tasks!
-        await handleAiPrioritize(tasksWithReplannedFlag);
+        await handleAiPrioritize(tasksWithMissedDeadlines);
       }
     };
 
@@ -810,11 +932,11 @@ export default function App() {
       clearTimeout(initialTimeout);
       clearInterval(interval);
     };
-  }, [isAuthenticated, tasks, isCompilingPriority]);
+  }, [isAuthenticated, isCompilingPriority]);
 
   // Trigger Gemini dynamic prioritizer and scheduler
-  const handleAiPrioritize = async (tasksToOptimize = tasks) => {
-    if (tasksToOptimize.length === 0) {
+  const handleAiPrioritize = async (tasksToOptimize = tasksRef.current) => {
+    if (!tasksToOptimize || tasksToOptimize.length === 0) {
       triggerAlert("error", "No tasks available for Gemini calculations.");
       return;
     }
@@ -830,32 +952,57 @@ export default function App() {
       }
 
       const currentTimeStr = new Date().toISOString();
-      const updated = await triggerAiPrioritization(tasksToOptimize, goals, freeBusy, currentTimeStr);
+      const updated = await triggerAiPrioritization(tasksToOptimize, goalsRef.current, freeBusy, currentTimeStr);
       
       // Push event creations/updates to Google Calendar so task event IDs stay correctly linked
       const finalizedTasks: Task[] = [];
       for (const t of updated) {
         let taskCopy = { ...t };
-        const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || tasks.find(item => item.id === taskCopy.id);
+        const currentTasks = tasksRef.current;
+        const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || currentTasks.find(item => item.id === taskCopy.id);
         
         if (existingTask) {
           taskCopy.initial_deadline = existingTask.initial_deadline || existingTask.deadline;
-          taskCopy.original_deadline = existingTask.original_deadline || existingTask.deadline;
+          // Only preserve original_deadline if it was explicitly set (e.g. by overdue checker)
+          taskCopy.original_deadline = existingTask.original_deadline;
           if (existingTask.calendarEventId && !taskCopy.calendarEventId) {
             taskCopy.calendarEventId = existingTask.calendarEventId;
           }
           if (existingTask.replanned) {
             taskCopy.replanned = true;
           }
+          if (existingTask.max_streak !== undefined) {
+            taskCopy.max_streak = existingTask.max_streak;
+          }
+          if (existingTask.recent_status_log) {
+            taskCopy.recent_status_log = existingTask.recent_status_log;
+          }
         } else {
           taskCopy.initial_deadline = t.deadline;
-          taskCopy.original_deadline = t.deadline;
+          // Do not set original_deadline for new tasks until they are actually missed
+          taskCopy.original_deadline = undefined;
         }
 
         if (taskCopy.scheduled_end) {
           taskCopy.deadline = taskCopy.scheduled_end;
         }
 
+        if (taskCopy.status !== "done") {
+          let shouldBeOverdue = false;
+          if (new Date(taskCopy.deadline).getTime() < Date.now()) {
+            shouldBeOverdue = true;
+          } else if (taskCopy.original_deadline && new Date(taskCopy.original_deadline).getTime() !== new Date(taskCopy.deadline).getTime()) {
+            shouldBeOverdue = true;
+          }
+
+          if (shouldBeOverdue && taskCopy.status !== "overdue") {
+            taskCopy.status = "overdue";
+          } else if (!shouldBeOverdue && taskCopy.status === "overdue") {
+            taskCopy.status = "not_started";
+          }
+        }
+
+        let syncFailed = false;
         if (isAuthenticated && taskCopy.status !== "done" && taskCopy.scheduled_start) {
           // Sync to calendar if slot changed, estimated effort changed, or calendar event is missing
           if (
@@ -870,20 +1017,30 @@ export default function App() {
               if (syncResult.calendarEventId) {
                 taskCopy.calendarEventId = syncResult.calendarEventId;
               }
-            } catch (syncErr) {
+            } catch (syncErr: any) {
               console.warn("Failed to sync task to Google Calendar:", syncErr);
+              syncFailed = true;
+              triggerAlert("error", `Calendar sync failed for "${taskCopy.title}". Reverting changes.`);
             }
           }
         }
         
-        // Always save the updated scheduler details (scheduled_start, scheduled_end, etc.) directly to Firestore!
-        try {
-          await saveTaskToFirestore(taskCopy);
-        } catch (saveErr) {
-          console.warn(`Failed to save task update to Firestore for task ID ${taskCopy.id}:`, saveErr);
+        // Only save to Firestore if sync didn't fail
+        if (!syncFailed) {
+          try {
+            await saveTaskToFirestore(taskCopy);
+            finalizedTasks.push(taskCopy);
+          } catch (saveErr) {
+            console.warn(`Failed to save task update to Firestore for task ID ${taskCopy.id}:`, saveErr);
+            // If firestore fails, we ideally should rollback calendar, but instructions say surface error and do not allow partial update.
+            // If firestore failed, the UI won't reflect the change (as long as we don't push to finalizedTasks).
+          }
+        } else {
+          // Keep the existing task state if sync failed
+          if (existingTask) {
+            finalizedTasks.push(existingTask);
+          }
         }
-        
-        finalizedTasks.push(taskCopy);
       }
 
       setTasks(finalizedTasks);
@@ -914,9 +1071,9 @@ export default function App() {
 
       // If the task does not have scheduled start/end times yet, set them to match the Google Calendar event times
       if (!task.scheduled_start || !task.scheduled_end) {
-        const startTime = task.scheduled_start ? new Date(task.scheduled_start) : new Date(task.deadline);
         const durationMin = task.estimated_effort > 0 ? task.estimated_effort : 60;
-        const endTime = task.scheduled_end ? new Date(task.scheduled_end) : new Date(startTime.getTime() + durationMin * 60 * 1000);
+        const endTime = task.scheduled_end ? new Date(task.scheduled_end) : new Date(task.deadline);
+        const startTime = task.scheduled_start ? new Date(task.scheduled_start) : new Date(endTime.getTime() - durationMin * 60 * 1000);
         
         updatedFields.scheduled_start = startTime.toISOString();
         updatedFields.scheduled_end = endTime.toISOString();
@@ -929,11 +1086,7 @@ export default function App() {
       const refreshedTasks = await getTasksFromFirestore();
       setTasks(refreshedTasks);
 
-      if (syncResult.warning) {
-        triggerAlert("error", syncResult.warning);
-      } else {
-        triggerAlert("success", "Scheduled and synchronized on Google Calendar!");
-      }
+      triggerAlert("success", "Scheduled and synchronized on Google Calendar!");
     } catch (err: any) {
       console.error(err);
       triggerAlert("error", err.message || "Failed to schedule Calendar event.");
@@ -958,28 +1111,40 @@ export default function App() {
     }
   };
 
-  const overdueCount = tasks.filter(t => t.status === "overdue" && t.status !== "done").length;
+  const isOverdueTask = (t: Task) => {
+    if (t.status === "done") return false;
+    const nowTime = Date.now();
+    // Overdue display if:
+    // 1. Current time is past the current deadline
+    if (new Date(t.deadline).getTime() < nowTime) return true;
+    // 2. Or, it was missed in the past (original_deadline is set and differs from deadline)
+    if (t.original_deadline && new Date(t.original_deadline).getTime() !== new Date(t.deadline).getTime()) return true;
+    return false;
+  };
+
+  const overdueCount = tasks.filter(t => isOverdueTask(t)).length;
 
   // Filter lists
   const filteredTasks = tasks.filter(t => {
-    if (activeFilter === "done") return t.status === "done";
-    if (activeFilter === "overdue") return t.status === "overdue";
+    if (activeFilter === "done") return t.status === "done" || t.status === "archived";
+    if (activeFilter === "overdue") return isOverdueTask(t);
     if (activeFilter === "habits") return false;
-    return t.status !== "done"; // not_started, in_progress, overdue (if looking at active, might exclude done)
+    return t.status !== "done" && t.status !== "archived"; // not_started, in_progress, overdue (if looking at active, might exclude done)
   });
 
   // Sort: Today tasks at top, other active tasks in middle, overdue tasks at bottom.
   // Within each category, sort by priority_score descending (highest priority first).
   const sortedTasks = [...filteredTasks].sort((a, b) => {
-    const aOverdue = a.status === "overdue";
-    const bOverdue = b.status === "overdue";
+    const aOverdue = isOverdueTask(a);
+    const bOverdue = isOverdueTask(b);
+    
     const aToday = isTodayTask(a);
     const bToday = isTodayTask(b);
 
     if (aToday && !bToday) return -1;
     if (!aToday && bToday) return 1;
 
-    // If neither is today, or both are today, group overdue at bottom
+    // Group overdue at the absolute bottom (if not today)
     if (aOverdue && !bOverdue) return 1;
     if (!aOverdue && bOverdue) return -1;
 
@@ -1051,7 +1216,7 @@ export default function App() {
             key="workspace"
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
-            className="flex flex-col min-h-screen"
+            className="flex flex-col h-screen overflow-hidden"
           >
             {/* Header Navbar */}
             <header className="sticky top-0 z-30 h-16 border-b border-[#E8E4DF] dark:border-zinc-800/80 bg-[#F7F5F2]/80 dark:bg-zinc-950/70 backdrop-blur-md flex items-center justify-between px-6">
@@ -1113,10 +1278,10 @@ export default function App() {
             </AnimatePresence>
 
             {/* Main view Grid layout */}
-            <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 lg:grid-cols-3 gap-6">
+            <main className="flex-1 max-w-7xl w-full mx-auto p-4 sm:p-6 grid grid-cols-1 md:grid-cols-3 gap-6 overflow-hidden">
               
               {/* Left 2 Columns: Tasks board & Scheduler */}
-              <div className="lg:col-span-2 space-y-6">
+              <div className="md:col-span-2 flex flex-col min-h-0 space-y-6">
                 
                 {/* Board Controls */}
                 <div className="flex flex-col sm:flex-row gap-4 justify-between items-start sm:items-center bg-white/70 dark:bg-zinc-900/10 border border-[#E8E4DF] dark:border-zinc-800/40 p-4 rounded-[24px] shadow-sm">
@@ -1127,7 +1292,7 @@ export default function App() {
                       onClick={() => setActiveFilter("active")}
                       className={`px-4 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                         activeFilter === "active"
-                          ? "bg-white dark:bg-zinc-850 text-[#2D2C2A] dark:text-zinc-150 shadow-xs font-bold"
+                          ? "bg-white dark:bg-zinc-800 text-[#2D2C2A] dark:text-zinc-200 shadow-xs font-bold"
                           : "text-[#7A756E] hover:text-[#2D2C2A] dark:text-zinc-400"
                       }`}
                     >
@@ -1152,7 +1317,7 @@ export default function App() {
                       onClick={() => setActiveFilter("done")}
                       className={`px-4 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                         activeFilter === "done"
-                          ? "bg-white dark:bg-zinc-850 text-[#2D2C2A] dark:text-zinc-150 shadow-xs font-bold"
+                          ? "bg-white dark:bg-zinc-800 text-[#2D2C2A] dark:text-zinc-200 shadow-xs font-bold"
                           : "text-[#7A756E] hover:text-[#2D2C2A] dark:text-zinc-400"
                       }`}
                     >
@@ -1163,7 +1328,7 @@ export default function App() {
                       id="tab-habits"
                       className={`px-4 py-1.5 rounded-lg text-xs font-semibold tracking-tight transition-all cursor-pointer ${
                         activeFilter === "habits"
-                          ? "bg-white dark:bg-zinc-850 text-[#2D2C2A] dark:text-zinc-150 shadow-xs font-bold border-l-2 border-[#D97757]"
+                          ? "bg-white dark:bg-zinc-800 text-[#2D2C2A] dark:text-zinc-200 shadow-xs font-bold border-l-2 border-[#D97757]"
                           : "text-[#7A756E] hover:text-[#2D2C2A] dark:text-zinc-400"
                       }`}
                     >
@@ -1205,7 +1370,7 @@ export default function App() {
                 </div>
 
                 {/* Task Listing with Layout Animations */}
-                <div className="space-y-4">
+                <div className="flex-1 flex flex-col min-h-0 max-h-[580px] overflow-y-auto pr-2 pb-4 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-200 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-800">
                   {activeFilter === "habits" ? (
                     <HabitTracker
                       tasks={tasks}
@@ -1217,9 +1382,10 @@ export default function App() {
                       onDelete={handleDeleteTask}
                     />
                   ) : loadingData ? (
-                    <div className="py-24 text-center space-y-3">
-                      <Loader2 className="w-10 h-10 animate-spin text-zinc-400 mx-auto" />
-                      <p className="text-xs text-zinc-400 font-mono uppercase tracking-widest">Compiling Workspace telemetry...</p>
+                    <div className="space-y-3">
+                      <TaskCardSkeleton />
+                      <TaskCardSkeleton />
+                      <TaskCardSkeleton />
                     </div>
                   ) : sortedTasks.length === 0 ? (
                     /* Beautiful Empty State with Helpful Guidance (Non-blank) */
@@ -1248,16 +1414,60 @@ export default function App() {
                             setEditingTask(null);
                             setIsTaskModalOpen(true);
                           }}
-                          className="mt-6 px-5 py-2.5 bg-zinc-950 dark:bg-zinc-150 hover:opacity-90 text-white dark:text-zinc-950 text-xs font-semibold rounded-xl tracking-tight shadow active:scale-95 transition-all inline-flex items-center gap-1.5"
+                          className="mt-6 px-5 py-2.5 bg-zinc-950 dark:bg-zinc-200 hover:opacity-90 text-white dark:text-zinc-950 text-xs font-semibold rounded-xl tracking-tight shadow active:scale-95 transition-all inline-flex items-center gap-1.5"
                         >
                           <Plus className="w-4 h-4" /> Create First Task
                         </button>
                       )}
                     </div>
                   ) : (
-                    <div className="grid grid-cols-1 gap-4">
+                    <div className="grid grid-cols-1 gap-3">
                       <AnimatePresence mode="popLayout">
-                        {sortedTasks.map((task) => (
+                        {/* Group archived goals and their subtasks */}
+                        {activeFilter === "done" && goals.filter(g => g.status === "archived").map(goal => {
+                          const goalTasks = sortedTasks.filter(t => t.goal_id === goal.id);
+                          if (goalTasks.length === 0) return null;
+                          return (
+                            <motion.div key={`archived-goal-${goal.id}`} layout className="mb-4 rounded-2xl border border-[#E8E4DF] dark:border-zinc-800/60 bg-white/40 dark:bg-zinc-900/40 p-4">
+                              <div className="flex items-center justify-between mb-3 px-1">
+                                <h4 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300 flex items-center gap-2">
+                                  <FolderArchive className="w-4 h-4 text-zinc-400" />
+                                  {goal.title}
+                                </h4>
+                                <button
+                                  onClick={() => handleRestoreGoal(goal.id)}
+                                  className="px-3 py-1.5 text-[11px] font-bold bg-[#D97757]/10 text-[#D97757] hover:bg-[#D97757]/20 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer"
+                                >
+                                  <RotateCcw className="w-3 h-3" /> Restore Goal & Tasks
+                                </button>
+                              </div>
+                              <div className="grid grid-cols-1 gap-2 pl-2 border-l-2 border-[#D97757]/20">
+                                {goalTasks.map((task) => (
+                                  <TaskCard
+                                    key={task.id}
+                                    task={task}
+                                    goals={goals}
+                                    onEdit={(t) => {
+                                      setEditingTask(t);
+                                      setIsTaskModalOpen(true);
+                                    }}
+                                    onDelete={handleDeleteTask}
+                                    onToggleComplete={handleToggleComplete}
+                                    onSyncToCalendar={handleSyncToCalendar}
+                                    onComposeEmail={handleOpenComposeEmail}
+                                  />
+                                ))}
+                              </div>
+                            </motion.div>
+                          );
+                        })}
+
+                        {/* Render remaining tasks (or all tasks if not in Archive Logs) */}
+                        {sortedTasks.filter(t => {
+                          if (activeFilter !== "done") return true;
+                          const goal = goals.find(g => g.id === t.goal_id);
+                          return !goal || goal.status !== "archived";
+                        }).map((task) => (
                           <TaskCard
                             key={task.id}
                             task={task}
@@ -1277,17 +1487,19 @@ export default function App() {
                   )}
                 </div>
 
-                {/* Core Assistant Chat interface */}
-                <AuraAssistant 
-                  tasks={tasks}
-                  goals={goals}
-                  onRefreshTasks={loadWorkspaceData}
-                  onSaveTask={handleSaveTask}
-                />
+                {/* Core Assistant Chat interface with top separator line and proper margins */}
+                <div className="pt-6 border-t border-[#E8E4DF] dark:border-zinc-800/60 mt-auto shrink-0" id="aura-assistant-wrapper">
+                  <AuraAssistant 
+                    tasks={tasks}
+                    goals={goals}
+                    onRefreshTasks={loadWorkspaceData}
+                    onSaveTask={handleSaveTask}
+                  />
+                </div>
               </div>
 
               {/* Right Column: Active Goals, Calendar List Feed */}
-              <div className="space-y-6">
+              <div className="space-y-6 overflow-y-auto pr-2 pb-6 min-h-0 [&::-webkit-scrollbar]:w-1.5 [&::-webkit-scrollbar-track]:bg-transparent [&::-webkit-scrollbar-thumb]:rounded-full [&::-webkit-scrollbar-thumb]:bg-zinc-200 dark:[&::-webkit-scrollbar-thumb]:bg-zinc-800">
                 
                 {/* Google Calendar Manager */}
                 <CalendarManager 
@@ -1313,7 +1525,7 @@ export default function App() {
                         </div>
                         <div className="space-y-1.5">
                           {draftConfirmations.map((draft, idx) => (
-                            <div key={idx} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-150 dark:border-zinc-800 text-xs">
+                            <div key={idx} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs">
                               <span className="font-medium text-zinc-700 dark:text-zinc-200 truncate max-w-[200px]">
                                 {draft.title}
                               </span>
@@ -1342,7 +1554,7 @@ export default function App() {
                             ? new Date(task.scheduled_start).toLocaleDateString() + ' ' + new Date(task.scheduled_start).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) 
                             : null;
                           return (
-                            <div key={task.id} className="p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-150/80 dark:border-zinc-800/60 space-y-2 text-xs">
+                            <div key={task.id} className="p-3.5 rounded-2xl bg-zinc-50 dark:bg-zinc-900/60 border border-zinc-200/80 dark:border-zinc-800/60 space-y-2 text-xs">
                               <div className="flex items-start justify-between gap-2">
                                 <span className="font-bold text-[#2D2C2A] dark:text-zinc-100 truncate max-w-[150px]" title={task.title}>
                                   {task.title}
@@ -1391,8 +1603,8 @@ export default function App() {
                   </div>
 
                   <GoalManager 
-                    goals={goals}
-                    tasks={tasks}
+                    goals={goals.filter(g => g.status !== "archived")}
+                    tasks={tasks.filter(t => t.status !== "archived")}
                     onCreateGoal={handleCreateGoal}
                     onDeleteGoal={handleDeleteGoal}
                     onDecomposeGoal={handleDecomposeGoal}

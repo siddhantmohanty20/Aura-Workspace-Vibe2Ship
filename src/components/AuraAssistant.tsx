@@ -121,6 +121,7 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
     setLoadingText(true);
 
     try {
+      const currentNow = new Date();
       const response = await fetch("/api/chat", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -130,8 +131,10 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
             role: m.role,
             text: m.text
           })),
-          activeTasks: tasks,
-          activeGoals: goals
+          activeTasks: tasks.filter(t => t.status !== "archived"),
+          activeGoals: goals.filter(g => g.status !== "archived"),
+          currentTimeStr: currentNow.toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
         })
       });
 
@@ -263,8 +266,8 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask }: Aura
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             messages: [{ role: "user", text }],
-            activeTasks: tasks,
-            activeGoals: goals
+            activeTasks: tasks.filter(t => t.status !== "archived"),
+            activeGoals: goals.filter(g => g.status !== "archived")
           })
         });
 

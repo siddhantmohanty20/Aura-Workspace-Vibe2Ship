@@ -126,16 +126,16 @@ export async function getTasksFromFirestore(): Promise<Task[]> {
         }
       } else {
         if (t.status !== "done") {
-          if (t.scheduled_end) {
-            const end = new Date(t.scheduled_end);
-            if (now.getTime() >= end.getTime() && t.status !== "overdue") {
-              t.status = "overdue";
-            }
-          } else {
-            const deadlineDate = new Date(t.deadline);
-            if (deadlineDate.getTime() < now.getTime() && t.status !== "overdue") {
-              t.status = "overdue";
-            }
+          let shouldBeOverdue = false;
+          
+          if (new Date(t.deadline).getTime() < now.getTime()) {
+            shouldBeOverdue = true;
+          } else if (t.original_deadline && new Date(t.original_deadline).getTime() !== new Date(t.deadline).getTime()) {
+            shouldBeOverdue = true;
+          }
+
+          if (shouldBeOverdue && t.status !== "overdue") {
+            t.status = "overdue";
           }
         }
       }
@@ -203,6 +203,8 @@ export async function saveTaskToFirestore(taskData: {
   replanned?: boolean | null;
   recurrence?: 'none' | 'daily' | 'weekly';
   completions?: string[];
+  max_streak?: number;
+  recent_status_log?: Record<string, "completed" | "missed">;
   completed_at?: string | null;
 }): Promise<string> {
   const user = auth.currentUser;
@@ -271,6 +273,12 @@ export async function saveTaskToFirestore(taskData: {
       if (taskData.completions !== undefined) {
         updatePayload.completions = taskData.completions;
       }
+      if (taskData.max_streak !== undefined) {
+        updatePayload.max_streak = taskData.max_streak;
+      }
+      if (taskData.recent_status_log !== undefined) {
+        updatePayload.recent_status_log = taskData.recent_status_log;
+      }
       if (determinedStatus === "done") {
         updatePayload.completed_at = completedAtVal;
       } else {
@@ -300,10 +308,12 @@ export async function saveTaskToFirestore(taskData: {
         scheduling_reason: taskData.scheduling_reason || "",
         scheduling_warning: taskData.scheduling_warning || "",
         initial_deadline: taskData.initial_deadline || taskData.deadline,
-        original_deadline: taskData.original_deadline || taskData.deadline,
+        original_deadline: taskData.original_deadline !== undefined ? taskData.original_deadline : null,
         replanned: taskData.replanned || null,
         recurrence: taskData.recurrence || "none",
         completions: taskData.completions || [],
+        max_streak: taskData.max_streak || 0,
+        recent_status_log: taskData.recent_status_log || {},
       };
 
       await setDoc(doc(db, path, newDocId), newTaskPayload);
@@ -347,9 +357,9 @@ export async function saveGoalToFirestore(title: string): Promise<string> {
 export async function deleteTaskFromFirestore(id: string): Promise<void> {
   const path = "tasks";
   try {
-    await deleteDoc(doc(db, path, id));
+    await updateDoc(doc(db, path, id), { status: "archived" });
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
 
@@ -357,20 +367,29 @@ export async function deleteTaskFromFirestore(id: string): Promise<void> {
  * Delete a Goal from Firestore
  * Also delete any tasks dependent on this goal
  */
+export async function updateGoalStatusInFirestore(id: string, status: "active" | "archived"): Promise<void> {
+  const path = "goals";
+  try {
+    await updateDoc(doc(db, path, id), { status });
+  } catch (error) {
+    handleFirestoreError(error, OperationType.UPDATE, path);
+  }
+}
+
 export async function deleteGoalFromFirestore(id: string, cascadeTasks: Task[]): Promise<void> {
   const path = "goals";
   try {
-    // 1. Delete Goal document
-    await deleteDoc(doc(db, path, id));
+    // 1. Soft delete Goal document (Archive)
+    await updateDoc(doc(db, path, id), { status: "archived" });
 
-    // 2. Delete any tasks currently referencing this goal
-    const linked = cascadeTasks.filter(t => t.goal_id === id);
+    // 2. Soft delete any tasks currently referencing this goal
+    const linked = cascadeTasks.filter(t => t.goal_id === id && t.status !== "archived");
     for (const t of linked) {
       const ref = doc(db, "tasks", t.id);
-      await deleteDoc(ref);
+      await updateDoc(ref, { status: "archived" });
     }
   } catch (error) {
-    handleFirestoreError(error, OperationType.DELETE, path);
+    handleFirestoreError(error, OperationType.UPDATE, path);
   }
 }
 
@@ -511,7 +530,6 @@ export async function triggerAiPrioritization(
         // Fix calendar sync bug: write scheduled_end to deadline field on reschedule
         if (opt.scheduled_end) {
           updatePayload.deadline = opt.scheduled_end;
-          updatePayload.original_deadline = match.original_deadline || match.initial_deadline || match.deadline;
           updatePayload.initial_deadline = match.initial_deadline || match.deadline;
         }
 

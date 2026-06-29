@@ -138,7 +138,16 @@ export function HabitTracker({ tasks, onLogCompletion, onEdit, onDelete }: Habit
             return false;
           }
         });
-        return { isCompleted, dayLabel, formattedDate };
+        
+        const loggedStatus = task.recent_status_log ? task.recent_status_log[dateStr] : null;
+        let visualStatus = 'neutral';
+        if (isCompleted || loggedStatus === 'completed') {
+            visualStatus = 'completed';
+        } else if (loggedStatus === 'missed') {
+            visualStatus = 'missed';
+        }
+        
+        return { visualStatus, dayLabel, formattedDate, isCompleted: visualStatus === 'completed' };
       });
 
       return (
@@ -152,11 +161,13 @@ export function HabitTracker({ tasks, onLogCompletion, onEdit, onDelete }: Habit
                 <span className="text-[9px] font-bold text-zinc-400 dark:text-zinc-500">{item.dayLabel}</span>
                 <div
                   className={`w-3.5 h-3.5 rounded-[3px] transition-all duration-300 ${
-                    item.isCompleted
+                    item.visualStatus === 'completed'
                       ? "bg-emerald-500 dark:bg-emerald-400 shadow-[0_0_6px_rgba(16,185,129,0.3)]"
+                      : item.visualStatus === 'missed'
+                      ? "bg-rose-400/50 dark:bg-rose-500/50 border border-rose-500/20"
                       : "bg-zinc-200 dark:bg-zinc-800"
                   }`}
-                  title={`${item.formattedDate}: ${item.isCompleted ? "Completed" : "Missed"}`}
+                  title={`${item.formattedDate}: ${item.visualStatus === 'completed' ? "Completed" : item.visualStatus === 'missed' ? "Missed" : "No record"}`}
                 />
               </div>
             ))}
@@ -261,7 +272,9 @@ export function HabitTracker({ tasks, onLogCompletion, onEdit, onDelete }: Habit
               <Flame className={`w-5 h-5 ${streak > 0 ? 'animate-pulse fill-orange-500/10' : ''}`} />
             </div>
             <div>
-              <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">Current Streak</p>
+              <p className="text-[10px] uppercase font-mono font-bold tracking-wider text-zinc-400 dark:text-zinc-500">
+                Current: {streak} {type === "daily" ? 'day' : 'week'}{streak !== 1 ? 's' : ''} &middot; Best: {Math.max(task.max_streak || 0, streak)} {type === "daily" ? 'day' : 'week'}{(Math.max(task.max_streak || 0, streak)) !== 1 ? 's' : ''}
+              </p>
               <p className="text-sm font-extrabold text-[#2D2C2A] dark:text-zinc-200">
                 {streak} {type === "daily" ? (streak === 1 ? 'day' : 'days') : (streak === 1 ? 'week' : 'weeks')}
               </p>

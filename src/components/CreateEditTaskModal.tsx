@@ -82,12 +82,15 @@ export function CreateEditTaskModal({
       setTitle(task.title);
       setDescription(task.description || "");
       
-      // format for datetime-local: YYYY-MM-DDTHH:MM
+      // format for datetime-local: YYYY-MM-DDTHH:MM in local time
       try {
         const d = new Date(task.deadline);
-        const iso = d.toISOString(); // "2026-06-23T00:14:41.000Z"
-        // Adjust timezone offset or simple formatting
-        const formatted = iso.substring(0, 16);
+        const year = d.getFullYear();
+        const month = String(d.getMonth() + 1).padStart(2, '0');
+        const day = String(d.getDate()).padStart(2, '0');
+        const hours = String(d.getHours()).padStart(2, '0');
+        const minutes = String(d.getMinutes()).padStart(2, '0');
+        const formatted = `${year}-${month}-${day}T${hours}:${minutes}`;
         setDeadline(formatted);
       } catch {
         setDeadline(task.deadline);
@@ -106,7 +109,12 @@ export function CreateEditTaskModal({
       tomorrow.setDate(tomorrow.getDate() + 1);
       tomorrow.setHours(9, 0, 0, 0);
       try {
-        setDeadline(tomorrow.toISOString().substring(0, 16));
+        const year = tomorrow.getFullYear();
+        const month = String(tomorrow.getMonth() + 1).padStart(2, '0');
+        const day = String(tomorrow.getDate()).padStart(2, '0');
+        const hours = String(tomorrow.getHours()).padStart(2, '0');
+        const minutes = String(tomorrow.getMinutes()).padStart(2, '0');
+        setDeadline(`${year}-${month}-${day}T${hours}:${minutes}`);
       } catch {
         setDeadline("");
       }
@@ -129,11 +137,21 @@ export function CreateEditTaskModal({
       return;
     }
 
+    let finalIsoString = "";
+    if (deadline.includes('T')) {
+      const [datePart, timePart] = deadline.split('T');
+      const [year, month, day] = datePart.split('-').map(Number);
+      const [hours, minutes] = timePart.split(':').map(Number);
+      finalIsoString = new Date(year, month - 1, day, hours, minutes).toISOString();
+    } else {
+      finalIsoString = new Date(deadline).toISOString();
+    }
+
     onSave({
       id: task?.id,
       title: title.trim(),
       description: description.trim(),
-      deadline: new Date(deadline).toISOString(),
+      deadline: finalIsoString,
       estimated_effort: estimatedEffort === "" ? 0 : Number(estimatedEffort),
       goal_id: goalId,
       recurrence: recurrence,
@@ -303,10 +321,10 @@ export function CreateEditTaskModal({
                 <select
                   value={goalId || ""}
                   onChange={(e) => setGoalId(e.target.value === "" ? null : e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white dark:bg-zinc-90 w-full text-zinc-800 dark:text-zinc-200 text-sm focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all"
+                  className="w-full px-4 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 text-sm focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all"
                 >
                   <option value="">(No Linked Goal - Standalone task)</option>
-                  {goals.map((goal) => (
+                  {goals.filter(g => g.status !== "archived").map((goal) => (
                     <option key={goal.id} value={goal.id}>
                       {goal.title}
                     </option>
@@ -322,7 +340,7 @@ export function CreateEditTaskModal({
                 <select
                   value={recurrence}
                   onChange={(e) => setRecurrence(e.target.value as 'none' | 'daily' | 'weekly')}
-                  className="w-full px-4 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white dark:bg-zinc-90 w-full text-zinc-800 dark:text-zinc-200 text-sm focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all"
+                  className="w-full px-4 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white dark:bg-zinc-900 text-zinc-800 dark:text-zinc-200 text-sm focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all"
                 >
                   <option value="none">One-time Task</option>
                   <option value="daily">Daily Habit / Task</option>

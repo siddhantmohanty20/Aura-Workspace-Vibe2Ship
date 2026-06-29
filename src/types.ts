@@ -23,6 +23,8 @@ export interface Task {
   replanned?: boolean | null;
   recurrence?: 'none' | 'daily' | 'weekly';
   completions?: string[];
+  max_streak?: number;
+  recent_status_log?: Record<string, "completed" | "missed">;
 }
 
 export interface Goal {
@@ -30,6 +32,7 @@ export interface Goal {
   userId: string;
   title: string;
   created_at: string;
+  status?: "active" | "archived";
 }
 
 export interface Note {
