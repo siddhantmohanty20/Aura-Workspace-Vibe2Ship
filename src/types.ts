@@ -5,7 +5,7 @@ export interface Task {
   description: string;
   deadline: string; // ISO Datetime string
   estimated_effort: number; // in minutes
-  status: 'not_started' | 'in_progress' | 'done' | 'overdue';
+  status: 'not_started' | 'in_progress' | 'done' | 'overdue' | 'archived';
   priority_score: number; // calculated by AI
   created_at: string;
   completed_at: string | null;

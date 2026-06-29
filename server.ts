@@ -4,8 +4,29 @@ import fs from "fs";
 import dotenv from "dotenv";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI, Type } from "@google/genai";
+import { fromZonedTime, toZonedTime, format } from "date-fns-tz";
 
 dotenv.config();
+
+function convertLocalToUtc(timeStr: string, timeZone: string): string {
+  if (!timeStr) return "";
+  const cleaned = timeStr.replace(/(Z|[+-]\d{2}:\d{2})$/, ''); 
+  try {
+    return fromZonedTime(cleaned, timeZone).toISOString();
+  } catch (e) {
+    return timeStr;
+  }
+}
+
+function convertUtcToLocal(utcStr: string, timeZone: string): string {
+  if (!utcStr) return "";
+  try {
+    const d = new Date(utcStr);
+    return format(toZonedTime(d, timeZone), "yyyy-MM-dd'T'HH:mm:00");
+  } catch (e) {
+    return utcStr;
+  }
+}
 
 const app = express();
 const PORT = 3000;
@@ -37,7 +58,7 @@ async function generateContentWithRetry(
   maxRetries = 2
 ): Promise<any> {
   let lastError: any = null;
-  const models = [params.model || "gemini-2.5-flash", "gemini-3.1-flash-lite"];
+  const models = [params.model || "gemini-3.5-flash", "gemini-3.1-flash-lite"];
 
   for (const model of models) {
     let attempt = 0;
@@ -114,7 +135,7 @@ app.get("/api/firebase-config", (req, res) => {
 
 // API: Prioritize Tasks & Estimate Effort with Calendar Slot Assignment
 app.post("/api/prioritize", async (req, res) => {
-  const { tasks = [], goals = [], freeBusy = [], currentTime } = req.body;
+  const { tasks = [], goals = [], freeBusy = [], currentTime, timeZone = "UTC" } = req.body;
 
   if (tasks.length === 0) {
     return res.json({ tasks: [] });
@@ -161,15 +182,19 @@ app.post("/api/prioritize", async (req, res) => {
       while (true) {
         const currentEnd = new Date(currentStart.getTime() + durationMin * 60 * 1000);
         
-        // Check daytime constraint (between 08:00 and 20:00 UTC)
-        const startHour = currentStart.getUTCHours();
-        const endHour = currentEnd.getUTCHours();
+        // Check daytime constraint (between 08:00 and 20:00 local time)
+        const localStart = toZonedTime(currentStart, timeZone);
+        const localEnd = toZonedTime(currentEnd, timeZone);
+        const startHour = localStart.getHours();
+        const endHour = localEnd.getHours();
         
-        if (startHour < 8 || startHour >= 20 || endHour > 20 || currentStart.getUTCDate() !== currentEnd.getUTCDate()) {
-          currentStart.setUTCHours(8, 0, 0, 0);
-          if (startHour >= 20 || currentStart.getUTCDate() !== currentEnd.getUTCDate()) {
-            currentStart.setUTCDate(currentStart.getUTCDate() + 1);
+        if (startHour < 8 || startHour >= 20 || endHour > 20 || localStart.getDate() !== localEnd.getDate()) {
+          // Move currentStart forward to the next 08:00 local time
+          localStart.setHours(8, 0, 0, 0);
+          if (startHour >= 20 || localStart.getDate() !== localEnd.getDate()) {
+            localStart.setDate(localStart.getDate() + 1);
           }
+          currentStart = fromZonedTime(localStart, timeZone);
           continue;
         }
         
@@ -189,12 +214,23 @@ app.post("/api/prioritize", async (req, res) => {
       }
     };
 
-    let currentSearchStart = new Date(Date.UTC(
-      now.getUTCFullYear(),
-      now.getUTCMonth(),
-      now.getUTCDate() + 1,
-      9, 0, 0, 0
-    ));
+    const localNow = toZonedTime(now, timeZone);
+    // If it's already past 20:00, start tomorrow at 8:00, otherwise start from the next rounded 15-min mark today
+    let startLocal = new Date(localNow.getTime());
+    if (startLocal.getHours() >= 20) {
+      startLocal.setDate(startLocal.getDate() + 1);
+      startLocal.setHours(8, 0, 0, 0);
+    } else if (startLocal.getHours() < 8) {
+      startLocal.setHours(8, 0, 0, 0);
+    } else {
+      // round up to next 15 mins
+      const mins = startLocal.getMinutes();
+      const remainder = mins % 15;
+      if (remainder !== 0) {
+        startLocal.setMinutes(mins + (15 - remainder));
+      }
+    }
+    let currentSearchStart = fromZonedTime(startLocal, timeZone);
 
     const processed = tasksToProcess.map((t: any) => {
       const deadlineDate = new Date(t.deadline);
@@ -299,28 +335,32 @@ app.post("/api/prioritize", async (req, res) => {
     }));
     const combinedFreeBusy = [...freeBusy, ...protectedBusyBlocks];
 
+    const localizedTasksToProcess = tasksToProcess.map((t: any) => ({
+      ...t,
+      deadline: convertUtcToLocal(t.deadline, timeZone),
+    }));
+
+    const localizedCombinedFreeBusy = combinedFreeBusy.map((fb: any) => ({
+      start: convertUtcToLocal(fb.start, timeZone),
+      end: convertUtcToLocal(fb.end, timeZone)
+    }));
+
+    const localNow = format(toZonedTime(now, timeZone), "yyyy-MM-dd'T'HH:mm:00");
+
     const prompt = `
 You are a high-performance productivity and calendar scheduling assistant. 
 
 CRITICAL TIME GROUNDING REFERENCE:
-- The current date and time in UTC timezone is exactly: ${now.toISOString()}
-- This corresponds to:
-  * Year: ${now.getUTCFullYear()}
-  * Month (1-based): ${now.getUTCMonth() + 1}
-  * Day of month: ${now.getUTCDate()}
-  * Day of week: ${now.toLocaleDateString('en-US', { weekday: 'long', timeZone: 'UTC' })}
-  * Hour: ${now.getUTCHours()}
-  * Minute: ${now.getUTCMinutes()}
-- Today's date is strictly ${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')} UTC.
-- All deadlines in the task list are formatted in ISO-8601 UTC format.
-- YOU MUST perform all relative date/time comparisons and slot allocations using ONLY the UTC timezone to ensure absolute consistency.
-- Any incomplete task whose deadline is strictly before ${now.toISOString()} (e.g. deadline is June 24th when today is June 25th) MUST be computed with status = "overdue".
+- The user is in timezone ${timeZone}.
+- The current date and time in the user's local timezone is exactly: ${localNow}
+- All dates and times in the tasks and freeBusy data provided to you are already in the user's local timezone (${timeZone}). Reason about deadlines, urgency, and scheduling entirely in this local time. Output scheduled_start and any other time values as local time strings, matching the same format you received.
+- Any incomplete task whose deadline is strictly before ${localNow} MUST be computed with status = "overdue".
 
 Analyze the following user tasks, goals, and existing calendar commitments (busy blocks), and perform prioritization and schedule optimization.
 
 Here are the inputs:
 1. Tasks:
-${JSON.stringify(tasksToProcess.map((t: any) => ({
+${JSON.stringify(localizedTasksToProcess.map((t: any) => ({
   id: t.id,
   title: t.title,
   description: t.description,
@@ -334,13 +374,13 @@ ${JSON.stringify(tasksToProcess.map((t: any) => ({
 ${JSON.stringify(goals, null, 2)}
 
 3. User's Google Calendar busy time intervals (freeBusy slots during the current week):
-${JSON.stringify(combinedFreeBusy, null, 2)}
+${JSON.stringify(localizedCombinedFreeBusy, null, 2)}
 
 Please perform the following optimizations for each task:
 
 1. COMPUTE PRIORITY SCORE:
    - Calculate a dynamic priority score (integer from 1 to 100) for every incomplete task.
-   - Tasks due sooner relative to ${now.toISOString()} must get higher priority scores. Overdue is highest priority (90-100).
+   - Tasks due sooner relative to ${localNow} must get higher priority scores. Overdue is highest priority (90-100).
    - "done" tasks must receive a very low priority score (1-10).
    - Tasks connected to Goals should receive a moderate priority score boost.
    - Provide a concise, clear one-sentence "priority_reason" explaining exactly why the task received this rank (e.g. "moved up — deadline in 18 hours, 2 hours of work remaining").
@@ -351,27 +391,28 @@ Please perform the following optimizations for each task:
 
 3. DETECT OVERDUE:
    - If the task is completed ("done"), keep it as "done".
-   - If the task's deadline has fully passed (is on or before ${now.toISOString()}) and is not "done", set status to "overdue".
+   - If the task's deadline has fully passed (is on or before ${localNow}) and is not "done", set status to "overdue".
    - Scheduled start/end times passing have NO impact on overdue classification.
    - Otherwise, preserve its current status.
 
 4. ALLOCATE CALENDAR SLOTS (SCHEDULING):
    - For all incomplete tasks (status is not "done"), find an optimal open (non-conflicting) slot in the user's calendar this week.
-   - A valid slot must start after ${now.toISOString()} and end before the end of the current week (7 days from now).
-   - The slot must be during daytime hours (between 08:00 and 20:00 UTC).
+   - A valid slot must start after ${localNow} and end before the end of the current week (7 days from now).
+   - IMPORTANT: Always prefer scheduling the slot as EARLY as possible (e.g., today) rather than later in the week, as long as it does not conflict with busy blocks.
+   - The slot must be during daytime hours (between 08:00 and 20:00 local time).
    - The slot duration must equal the task's "estimated_effort" (in minutes).
    - The slot must NOT overlap with any of the user's calendar busy blocks listed in freeBusy.
    - The slot must NOT overlap with slots allocated to other tasks! Each task must have its own separate, sequential time block.
-   - The slot should ideally start and end BEFORE the task's deadline in UTC.
-   - If an open slot before the deadline cannot be found, schedule it in the next available open slot after the deadline (but within the current week), and set "scheduling_warning" to a clear warning explaining this (e.g., "No open slot found before deadline. Scheduled at Wednesday 14:00 UTC after deadline due to busy calendar.").
+   - The slot should ideally start and end BEFORE the task's deadline in local time.
+   - If an open slot before the deadline cannot be found, schedule it in the next available open slot after the deadline (but within the current week), and set "scheduling_warning" to a clear warning explaining this (e.g., "No open slot found before deadline. Scheduled at Wednesday 14:00 after deadline due to busy calendar.").
    - If absolutely no open slot can be found for a task in the entire week, set "scheduled_start" and "scheduled_end" to null, and set "scheduling_warning" to "No suitable open slot of X minutes found on your calendar before the end of the week."
-   - Provide a concise "scheduling_reason" explaining the slot placement decision (e.g. "Scheduled Tuesday 2 PM UTC, first open non-conflicting slot before its Wednesday deadline").
+   - Provide a concise "scheduling_reason" explaining the slot placement decision (e.g. "Scheduled Tuesday 2 PM, first open non-conflicting slot before its Wednesday deadline").
 
 Format your output STRICTLY as a JSON object containing a "tasks" list matching the required schema.
 `;
 
     const response = await generateContentWithRetry(aiClient, {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -388,8 +429,8 @@ Format your output STRICTLY as a JSON object containing a "tasks" list matching 
                   priority_reason: { type: Type.STRING, description: "One-sentence reason for priority rank" },
                   estimated_effort: { type: Type.INTEGER, description: "Estimated effort in minutes" },
                   status: { type: Type.STRING, description: "Updated status: not_started, in_progress, done, overdue" },
-                  scheduled_start: { type: Type.STRING, description: "ISO-8601 string of scheduled start time, or null if none found" },
-                  scheduled_end: { type: Type.STRING, description: "ISO-8601 string of scheduled end time, or null if none found" },
+                  scheduled_start: { type: Type.STRING, description: "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00') of scheduled start time, or null if none found" },
+                  scheduled_end: { type: Type.STRING, description: "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00') of scheduled end time, or null if none found" },
                   scheduling_reason: { type: Type.STRING, description: "One-sentence reason for chosen slot" },
                   scheduling_warning: { type: Type.STRING, description: "Warning if no slot is found before deadline, empty if okay" }
                 },
@@ -405,7 +446,12 @@ Format your output STRICTLY as a JSON object containing a "tasks" list matching 
     const text = response.text || "{\"tasks\":[]}";
     const parsed = JSON.parse(text);
     const returnedTasks = parsed.tasks || [];
-    const processedMap = new Map(returnedTasks.map((t: any) => [t.id, t]));
+    
+    const processedMap = new Map(returnedTasks.map((t: any) => {
+      if (t.scheduled_start) t.scheduled_start = convertLocalToUtc(t.scheduled_start, timeZone);
+      if (t.scheduled_end) t.scheduled_end = convertLocalToUtc(t.scheduled_end, timeZone);
+      return [t.id, t];
+    }));
 
     const finalTasks = tasks.map((originalTask: any) => {
       // If it's a protected task, keep it exactly as is
@@ -434,7 +480,7 @@ Format your output STRICTLY as a JSON object containing a "tasks" list matching 
 
 // API: Extract structured tasks from goals or free-form notes
 app.post("/api/extract-tasks", async (req, res) => {
-  const { text = "", type = "notes", currentTime } = req.body;
+  const { text = "", type = "notes", currentTime, timeZone = "UTC" } = req.body;
   if (!text || !text.trim()) {
     return res.json({ tasks: [] });
   }
@@ -465,6 +511,7 @@ app.post("/api/extract-tasks", async (req, res) => {
   }
 
   try {
+    const localNow = format(toZonedTime(now, timeZone), "yyyy-MM-dd'T'HH:mm:00");
     let prompt = "";
     if (type === "goal") {
       prompt = `
@@ -474,16 +521,17 @@ Your task is to take the high-level goal and break it down into 4 to 6 concrete,
 HIGH-LEVEL GOAL: "${text}"
 
 TIME GROUNDING REFERENCE:
-- Today is UTC: ${now.toUTCString()} (ISO: ${now.toISOString()})
-- All deadlines for sub-tasks MUST be strictly in the future relative to today's date.
-- Suggest realistic deadlines staggered sequentially over the coming days or weeks in UTC format.
-- Format each deadline as a complete ISO-8601 UTC string.
+- The user is in timezone ${timeZone}.
+- The current date and time in the user's local timezone is exactly: ${localNow}
+- All deadlines for sub-tasks MUST be strictly in the future relative to today's date in local time.
+- Suggest realistic deadlines staggered sequentially over the coming days or weeks.
+- Output deadlines as local time strings, matching the format 'YYYY-MM-DDTHH:mm:00'. Do NOT append 'Z' or offset.
 
 For each sub-task, provide:
 1. "title": A clear, action-oriented title.
 2. "description": A short explanation of what is required.
 3. "estimated_effort": A realistic estimated effort in minutes (between 30 and 180).
-4. "deadline": A suggested deadline (ISO-8601 UTC string).
+4. "deadline": A suggested deadline (Local date-time string WITHOUT 'Z').
 `;
     } else {
       prompt = `
@@ -496,22 +544,23 @@ ${text}
 """
 
 TIME GROUNDING REFERENCE:
-- Today is UTC: ${now.toUTCString()} (ISO: ${now.toISOString()})
+- The user is in timezone ${timeZone}.
+- The current date and time in the user's local timezone is exactly: ${localNow}
 - For each task, infer a realistic deadline:
-  * If a deadline, day, or timeframe is mentioned in the text (e.g. "by tomorrow", "this Friday", "in 3 days", "due June 28"), calculate the precise ISO-8601 UTC date relative to today's date (${now.toISOString()}).
+  * If a deadline, day, or timeframe is mentioned in the text (e.g. "by tomorrow", "this Friday", "in 3 days", "due June 28"), calculate the precise date and time in local time.
   * If no deadline is mentioned, suggest a realistic deadline in the next 1 to 4 days relative to today.
-- All deadlines must be formatted as ISO-8601 UTC strings.
+- Output deadlines as local time strings, matching the format 'YYYY-MM-DDTHH:mm:00'. Do NOT append 'Z' or offset.
 
 For each extracted task, provide:
 1. "title": A clear, action-oriented title.
 2. "description": Context extracted from the note about this action.
 3. "estimated_effort": Estimated duration in minutes based on the action (between 15 and 240).
-4. "deadline": The calculated/inferred deadline (ISO-8601 UTC string).
+4. "deadline": The calculated/inferred deadline (Local date-time string WITHOUT 'Z').
 `;
     }
 
     const response = await generateContentWithRetry(aiClient, {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -526,7 +575,7 @@ For each extracted task, provide:
                   title: { type: Type.STRING, description: "Clear, action-oriented task title" },
                   description: { type: Type.STRING, description: "Detailed description of what needs to be done" },
                   estimated_effort: { type: Type.INTEGER, description: "Estimated effort in minutes" },
-                  deadline: { type: Type.STRING, description: "ISO-8601 deadline string" }
+                  deadline: { type: Type.STRING, description: "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00')" }
                 },
                 required: ["title", "description", "estimated_effort", "deadline"]
               }
@@ -538,10 +587,75 @@ For each extracted task, provide:
     });
 
     const parsed = JSON.parse(response.text || "{\"tasks\":[]}");
-    return res.json(parsed);
+    const returnedTasks = parsed.tasks || [];
+    returnedTasks.forEach((t: any) => {
+      if (t.deadline) t.deadline = convertLocalToUtc(t.deadline, timeZone);
+    });
+    return res.json({ tasks: returnedTasks });
   } catch (error) {
     console.error("Error extracting tasks with Gemini:", error);
     return res.status(500).json({ error: "Failed to extract tasks" });
+  }
+});
+
+// API: Generate Email Draft
+app.post("/api/generate-email", async (req, res) => {
+  const { task } = req.body;
+  if (!task) {
+    return res.status(400).json({ error: "Task data is required" });
+  }
+
+  if (!aiClient) {
+    // Fallback if no API key
+    const deadlineText = new Date(task.deadline).toLocaleString();
+    const bodyTemplate = `Hi Team,\n\nI am currently working on the following workspace task within Aura:\n\nTask: ${task.title}\nDescription: ${task.description || "No description provided."}\nDeadline: ${deadlineText}\nEstimated effort: ${task.estimated_effort} minutes\nPriority Score: ${task.priority_score}%\n\nPlease let me know if there are any roadblocks or adjustments required.\n\nBest regards,\nAura Workspace Compiler`;
+    return res.json({ subject: `Aura Focus: Workspace Action Item - ${task.title}`, body: bodyTemplate });
+  }
+
+  try {
+    const prompt = `
+You are an expert executive assistant drafting a professional email on behalf of a user.
+Based on the following task context, generate a professional and concise email draft.
+The user is working on this task and needs to communicate progress, ask for review, or inform stakeholders.
+
+Task Context:
+- Title: ${task.title}
+- Description: ${task.description || "No specific details provided."}
+- Scheduled: ${task.scheduled_start ? new Date(task.scheduled_start).toLocaleString() : "Not scheduled yet"} to ${task.scheduled_end ? new Date(task.scheduled_end).toLocaleString() : "Not scheduled yet"}
+- Deadline: ${new Date(task.deadline).toLocaleString()}
+- Status: ${task.status}
+
+Format your output STRICTLY as a JSON object with two fields:
+- "subject": The subject line of the email (concise, clear).
+- "body": The full body of the email in plain text. Sign off as the user (or leave a generic placeholder like [Your Name]).
+
+Make it sound highly professional, proactive, and clear.
+    `;
+
+    const response = await generateContentWithRetry(aiClient, {
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          properties: {
+            subject: { type: Type.STRING, description: "Email subject line" },
+            body: { type: Type.STRING, description: "Full email body content" }
+          },
+          required: ["subject", "body"]
+        }
+      }
+    });
+
+    const result = JSON.parse(response.text || "{}");
+    return res.json({ subject: result.subject, body: result.body });
+  } catch (error) {
+    console.error("Error generating email draft:", error);
+    // Fallback
+    const deadlineText = new Date(task.deadline).toLocaleString();
+    const bodyTemplate = `Hi Team,\n\nI am currently working on the following workspace task within Aura:\n\nTask: ${task.title}\nDescription: ${task.description || "No description provided."}\nDeadline: ${deadlineText}\nEstimated effort: ${task.estimated_effort} minutes\nPriority Score: ${task.priority_score}%\n\nPlease let me know if there are any roadblocks or adjustments required.\n\nBest regards,\nAura Workspace Compiler`;
+    return res.json({ subject: `Aura Focus: Workspace Action Item - ${task.title}`, body: bodyTemplate });
   }
 });
 
@@ -555,6 +669,7 @@ app.post("/api/chat", async (req, res) => {
 You are Aura, an elite, minimalist AI productivity partner built directly into the Aura Workspace.
 The current reference time is exactly: ${currentNow.toISOString()}.
 Today is ${currentNow.toLocaleDateString('en-US', { weekday: 'long', timeZone: tz })}, ${currentNow.toLocaleDateString('en-US', { timeZone: tz })} in the user's timezone (${tz}).
+- When producing any ISO-8601 deadline or scheduled time, first reason about the correct local date and time. Then express your answer strictly in LOCAL time format as 'YYYY-MM-DDTHH:mm:00' (DO NOT append 'Z' or offset). We will handle the conversion to UTC in code.
 
 Style Guidelines:
 - Express yourself with elegant, concise, clear, and reassuring vocabulary. Avoid excessive emoji usage (1 or 2 is fine for accentuation, keep them professional).
@@ -566,7 +681,7 @@ Current State of Workspace:
 - Active Goals: ${JSON.stringify(activeGoals.map((g: any) => g.title))}
 
 Capabilities & Action Triggers:
-You can direct the workspace to trigger physical actions on the user's behalf if they ask you to create a task, update/schedule an item on their calendar, draft a Gmail, create a goal, or decompose a goal into subtasks.
+You can direct the workspace to trigger physical actions on the user's behalf if they ask you to create/update/delete a task, update/schedule an item on their calendar, draft a Gmail, create/delete a goal, decompose a goal into subtasks, prioritize tasks, or create/extract notes.
 
 To perform an action, you must specify it in your JSON response under the "action" key.
 
@@ -574,30 +689,45 @@ You MUST respond formatted in structured JSON matching this exact schema:
 {
   "text": "Your elegant, conversational markdown response here explaining what you did.",
   "action": null | {
-    "type": "create_task" | "create_calendar_event" | "create_gmail_draft" | "create_goal" | "decompose_goal",
+    "type": "create_task" | "update_task" | "delete_task" | "create_calendar_event" | "create_gmail_draft" | "create_goal" | "delete_goal" | "decompose_goal" | "prioritize_tasks" | "create_note" | "extract_note",
     "params": {
       // If "create_task":
       "title": "string",
       "description": "string",
-      "deadline": "ISO-8601 string (e.g. 2026-06-24T09:00:00.000Z)",
-      "estimated_effort": number (minutes)
+      "deadline": "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00')",
+      "estimated_effort": number (minutes),
+
+      // OR if "update_task":
+      "id": "string",
+      "title": "string",
+      "description": "string",
+      "deadline": "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00')",
+      "estimated_effort": number,
+      
+      // OR if "delete_task":
+      "id": "string (the task id from Active Tasks)",
       
       // OR if "create_calendar_event":
       "summary": "string",
       "description": "string",
-      "start": { "dateTime": "ISO-8601 string (e.g. 2026-06-23T15:00:00.000Z)" },
-      "end": { "dateTime": "ISO-8601 string (e.g. 2026-06-23T16:00:00.000Z)" }
+      "start": { "dateTime": "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00')" },
+      "end": { "dateTime": "Local date-time string WITHOUT 'Z' (e.g. 'YYYY-MM-DDTHH:mm:00')" },
       
       // OR if "create_gmail_draft":
       "to": "string (recipient email)",
       "subject": "string",
-      "bodyText": "string (the plain text body)"
+      "bodyText": "string (the plain text body)",
 
-      // OR if "create_goal":
-      "title": "string (the title of the goal)"
-
-      // OR if "decompose_goal" (this automatically creates the goal and then decomposes it into scheduled sub-tasks):
-      "title": "string (the title of the goal)"
+      // OR if "create_goal" or "decompose_goal":
+      "title": "string (the title of the goal)",
+      
+      // OR if "delete_goal":
+      "id": "string (the goal id from Active Goals)",
+      
+      // OR if "create_note" or "extract_note":
+      "content": "string (the body of the note)"
+      
+      // For "prioritize_tasks", params can be empty {}
     }
   }
 }
@@ -621,7 +751,7 @@ Do not output any wrappers, markdown blocks, or commentary outside of the valid 
     }));
 
     const response = await generateContentWithRetry(aiClient, {
-      model: "gemini-2.5-flash",
+      model: "gemini-3.5-flash",
       contents: contents,
       config: {
         systemInstruction: systemInstruction,
@@ -630,6 +760,17 @@ Do not output any wrappers, markdown blocks, or commentary outside of the valid 
     });
 
     const parsed = JSON.parse(response.text || "{}");
+
+    if (parsed.action && parsed.action.params) {
+      const p = parsed.action.params;
+      if (parsed.action.type === "create_task" || parsed.action.type === "update_task") {
+        if (p.deadline) p.deadline = convertLocalToUtc(p.deadline, tz);
+      } else if (parsed.action.type === "create_calendar_event") {
+        if (p.start && p.start.dateTime) p.start.dateTime = convertLocalToUtc(p.start.dateTime, tz);
+        if (p.end && p.end.dateTime) p.end.dateTime = convertLocalToUtc(p.end.dateTime, tz);
+      }
+    }
+
     res.json(parsed);
   } catch (error: any) {
     console.error("Chat error:", error);

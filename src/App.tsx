@@ -24,13 +24,13 @@ import {
   updateCalendarEvent, 
   deleteCalendarEvent, 
   fetchFreeBusyCurrentWeek,
-  createGmailDraft
+  createGmailDraft,
+  deleteGmailDraft
 } from "./workspace";
 import { TaskCard } from "./components/TaskCard";
 import { CreateEditTaskModal } from "./components/CreateEditTaskModal";
 import { GoalManager } from "./components/GoalManager";
 import { CalendarManager } from "./components/CalendarManager";
-import { GmailDraftModal } from "./components/GmailDraftModal";
 import { AuraAssistant } from "./components/AuraAssistant";
 import { NotesManager } from "./components/NotesManager";
 import { HabitTracker, getDailyStreak, getWeeklyStreak } from "./components/HabitTracker";
@@ -49,7 +49,8 @@ import {
   TrendingUp,
   Inbox,
   FolderArchive,
-  RotateCcw
+  RotateCcw,
+  Trash2
 } from "lucide-react";
 import { motion, AnimatePresence } from "motion/react";
 
@@ -101,9 +102,6 @@ export default function App() {
   // Modals / Panels toggles
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
-  
-  const [isEmailModalOpen, setIsEmailModalOpen] = useState(false);
-  const [emailTaskSource, setEmailTaskSource] = useState<Task | null>(null);
 
   // Status Alerts
   const [alertMessage, setAlertMessage] = useState<{ type: "success" | "error"; text: string } | null>(null);
@@ -313,11 +311,22 @@ export default function App() {
       return { calendarEventId: null };
     }
 
-    // 3. Task has a deadline. Create or update calendar event
+    // 3. If task doesn't have a scheduled_start, it shouldn't have a calendar event yet
+    if (!taskData.scheduled_start || !taskData.scheduled_end) {
+      if (existingTaskObj?.calendarEventId) {
+        try {
+          await deleteCalendarEvent(existingTaskObj.calendarEventId);
+        } catch (err: any) {
+          console.warn("Failed to delete unscheduled calendar event:", err);
+        }
+      }
+      return { calendarEventId: null };
+    }
+
+    // 4. Task has a scheduled slot. Create or update calendar event
     try {
-      const durationMin = taskData.estimated_effort > 0 ? taskData.estimated_effort : 60;
-      const endTime = taskData.scheduled_end ? new Date(taskData.scheduled_end) : new Date(taskData.deadline);
-      const startTime = taskData.scheduled_start ? new Date(taskData.scheduled_start) : new Date(endTime.getTime() - durationMin * 60 * 1000);
+      const startTime = new Date(taskData.scheduled_start);
+      const endTime = new Date(taskData.scheduled_end);
 
       const eventData = {
         summary: taskData.title,
@@ -634,10 +643,10 @@ export default function App() {
 
     try {
       await deleteGoalFromFirestore(id, tasks);
-      const refreshedGoals = await getGoalsFromFirestore();
-      const refreshedTasks = await getTasksFromFirestore();
-      setGoals(refreshedGoals);
-      setTasks(refreshedTasks);
+      
+      // Update local state directly to prevent stale data from immediately fetching
+      setGoals(prev => prev.map(g => g.id === id ? { ...g, status: "archived" } : g));
+      setTasks(prev => prev.map(t => t.goal_id === id ? { ...t, status: "archived", calendarEventId: null } : t));
       
       if (calendarWarning) {
         triggerAlert("error", calendarWarning);
@@ -723,7 +732,8 @@ export default function App() {
         body: JSON.stringify({
           text: title,
           type: "goal",
-          currentTime: new Date().toISOString()
+          currentTime: new Date().toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
         })
       });
 
@@ -850,6 +860,42 @@ export default function App() {
     }
   };
 
+  const handleExtractFromNoteContent = async (content: string) => {
+    try {
+      const response = await fetch("/api/extract-tasks", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          text: content,
+          type: "notes",
+          currentTime: new Date().toISOString(),
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+        })
+      });
+      if (response.ok) {
+        const data = await response.json();
+        const extracted = data.tasks || [];
+        if (extracted.length > 0) {
+          await handleTasksExtracted(extracted);
+        }
+      }
+    } catch (e) {
+      console.error(e);
+      triggerAlert("error", "Error extracting tasks from note via Aura.");
+    }
+  };
+
+  const handleDeleteDraft = async (draftId: string) => {
+    try {
+      await deleteGmailDraft(draftId);
+      setDraftConfirmations(prev => prev.filter(d => d.draftId !== draftId));
+      triggerAlert("success", "Draft successfully removed.");
+    } catch (err) {
+      console.error(err);
+      triggerAlert("error", "Failed to remove draft from Gmail.");
+    }
+  };
+
   // Overdue check and automatic silent re-planning loop
   useEffect(() => {
     if (!isAuthenticated || isCompilingPriority) return;
@@ -876,11 +922,24 @@ export default function App() {
       const tasksWithMissedDeadlines = currentTasks.map(t => {
         if (t.status !== "done") {
           const deadlineTime = new Date(t.deadline).getTime();
-          if (now.getTime() > deadlineTime) {
+          let needsReplan = false;
+          
+          if (t.status === "overdue") {
+            // Already overdue, do not continuously replan on a loop
+            needsReplan = false;
+          } else {
+            // Not overdue yet, replan if it missed its original deadline
+            if (now.getTime() > deadlineTime) {
+              needsReplan = true;
+            }
+          }
+
+          if (needsReplan) {
             hasOverdueToReplan = true;
             overdueTasksForDraft.push(t);
             return {
               ...t,
+              status: "overdue",
               // If this is the first time it's missed, capture the current deadline as original_deadline
               original_deadline: t.original_deadline || t.deadline
             };
@@ -892,33 +951,6 @@ export default function App() {
       if (hasOverdueToReplan) {
         console.log("Aura Workspace Autocure: Detected missed deadlines. Triggering silent re-planning...");
         
-        for (const overdueTask of overdueTasksForDraft) {
-          console.log(`Missed and re-planned task: "${overdueTask.title}"`);
-          if (hasEmailIntent(overdueTask.title, overdueTask.description || "")) {
-            try {
-              const subject = `Delay Update: ${overdueTask.title}`;
-              const bodyText = `Hi,\n\nI wanted to update you regarding "${overdueTask.title}". There has been a slight delay on my end, but I am rescheduling this and will follow up with next steps shortly.\n\nBest regards,\n[Sent via Aura AI Assistant]`;
-              
-              const draftResult = await createGmailDraft("recipient@example.com", subject, bodyText);
-              if (draftResult && draftResult.id) {
-                setDraftConfirmations(prev => [
-                  ...prev,
-                  {
-                    taskId: overdueTask.id,
-                    draftId: draftResult.id,
-                    title: overdueTask.title,
-                    gmailLink: "https://mail.google.com/mail/u/0/#drafts"
-                  }
-                ]);
-                triggerAlert("success", `Gmail draft created for: "${overdueTask.title}"`);
-              }
-            } catch (draftErr) {
-              console.warn("Failed to create Gmail draft for overdue task:", draftErr);
-              triggerAlert("error", `Failed to create Gmail draft for "${overdueTask.title}". Skipping draft.`);
-            }
-          }
-        }
-
         // Trigger silent prioritization/scheduling with the marked tasks!
         await handleAiPrioritize(tasksWithMissedDeadlines);
       }
@@ -962,6 +994,7 @@ export default function App() {
         const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || currentTasks.find(item => item.id === taskCopy.id);
         
         if (existingTask) {
+          taskCopy.deadline = existingTask.deadline;
           taskCopy.initial_deadline = existingTask.initial_deadline || existingTask.deadline;
           // Only preserve original_deadline if it was explicitly set (e.g. by overdue checker)
           taskCopy.original_deadline = existingTask.original_deadline;
@@ -981,10 +1014,6 @@ export default function App() {
           taskCopy.initial_deadline = t.deadline;
           // Do not set original_deadline for new tasks until they are actually missed
           taskCopy.original_deadline = undefined;
-        }
-
-        if (taskCopy.scheduled_end) {
-          taskCopy.deadline = taskCopy.scheduled_end;
         }
 
         if (taskCopy.status !== "done") {
@@ -1062,23 +1091,25 @@ export default function App() {
     if (!confirmed) return;
 
     try {
-      const syncResult = await syncTaskToGoogleCalendar(task, task);
+      let taskToSync = { ...task };
       
-      const updatedFields: any = {
-        ...task,
-        calendarEventId: syncResult.calendarEventId,
-      };
-
       // If the task does not have scheduled start/end times yet, set them to match the Google Calendar event times
       if (!task.scheduled_start || !task.scheduled_end) {
         const durationMin = task.estimated_effort > 0 ? task.estimated_effort : 60;
         const endTime = task.scheduled_end ? new Date(task.scheduled_end) : new Date(task.deadline);
         const startTime = task.scheduled_start ? new Date(task.scheduled_start) : new Date(endTime.getTime() - durationMin * 60 * 1000);
         
-        updatedFields.scheduled_start = startTime.toISOString();
-        updatedFields.scheduled_end = endTime.toISOString();
-        updatedFields.scheduling_reason = "Manually synchronized to Google Calendar slot.";
+        taskToSync.scheduled_start = startTime.toISOString();
+        taskToSync.scheduled_end = endTime.toISOString();
+        taskToSync.scheduling_reason = "Manually synchronized to Google Calendar slot.";
       }
+
+      const syncResult = await syncTaskToGoogleCalendar(taskToSync, task);
+      
+      const updatedFields: any = {
+        ...taskToSync,
+        calendarEventId: syncResult.calendarEventId,
+      };
 
       await saveTaskToFirestore(updatedFields);
 
@@ -1093,10 +1124,49 @@ export default function App() {
     }
   };
 
-  // Open email draft modal for task
-  const handleOpenComposeEmail = (task: Task) => {
-    setEmailTaskSource(task);
-    setIsEmailModalOpen(true);
+  // Direct draft creation instead of opening modal
+  const handleOpenComposeEmail = async (task: Task) => {
+    triggerAlert("success", "Generating and saving draft...");
+    try {
+      let subject = `Aura Focus: Workspace Action Item - ${task.title}`;
+      let body = "";
+
+      try {
+        const res = await fetch("/api/generate-email", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ task })
+        });
+        const data = await res.json();
+        if (data.subject) subject = data.subject;
+        if (data.body) body = data.body;
+      } catch (genErr) {
+        console.warn("AI Email generation failed, using template:", genErr);
+      }
+
+      if (!body) {
+        const deadlineText = new Date(task.deadline).toLocaleString();
+        body = `Hi Team,\n\nI am currently working on the following workspace task within Aura:\n\nTask: ${task.title}\nDescription: ${task.description || "No description provided."}\nDeadline: ${deadlineText}\nEstimated effort: ${task.estimated_effort} minutes\nPriority Score: ${task.priority_score}%\n\nPlease let me know if there are any roadblocks or adjustments required.\n\nBest regards,\nAura Workspace Compiler`;
+      }
+
+      const draftResult = await createGmailDraft("", subject, body);
+      
+      if (draftResult && draftResult.id) {
+        setDraftConfirmations(prev => [
+          ...prev,
+          {
+            taskId: task.id,
+            draftId: draftResult.id,
+            title: task.title,
+            gmailLink: "https://mail.google.com/mail/u/0/#drafts"
+          }
+        ]);
+        triggerAlert("success", `Draft saved successfully in Gmail for "${task.title}"`);
+      }
+    } catch (err: any) {
+      console.error(err);
+      triggerAlert("error", err.message || "Failed to create Gmail draft. Please check your authorization.");
+    }
   };
 
   // Helper to determine if task is scheduled for today
@@ -1132,21 +1202,23 @@ export default function App() {
     return t.status !== "done" && t.status !== "archived"; // not_started, in_progress, overdue (if looking at active, might exclude done)
   });
 
-  // Sort: Today tasks at top, other active tasks in middle, overdue tasks at bottom.
+  // Sort: Today tasks at top, Future tasks in middle, Overdue tasks at bottom.
   // Within each category, sort by priority_score descending (highest priority first).
   const sortedTasks = [...filteredTasks].sort((a, b) => {
-    const aOverdue = isOverdueTask(a);
-    const bOverdue = isOverdueTask(b);
+    // Treat overdue as its own separate category (bottom)
+    const aOverdue = a.status === "overdue" || (new Date(a.deadline).getTime() < new Date().getTime());
+    const bOverdue = b.status === "overdue" || (new Date(b.deadline).getTime() < new Date().getTime());
     
+    // Group overdue at the absolute bottom
+    if (aOverdue && !bOverdue) return 1;
+    if (!aOverdue && bOverdue) return -1;
+
+    // For non-overdue tasks, sort Today vs Future
     const aToday = isTodayTask(a);
     const bToday = isTodayTask(b);
 
     if (aToday && !bToday) return -1;
     if (!aToday && bToday) return 1;
-
-    // Group overdue at the absolute bottom (if not today)
-    if (aOverdue && !bOverdue) return 1;
-    if (!aOverdue && bOverdue) return -1;
 
     // Same group, sort by priority score descending
     return b.priority_score - a.priority_score;
@@ -1224,10 +1296,18 @@ export default function App() {
                 <div className="h-9 w-9 rounded-xl bg-[#D97757] flex items-center justify-center text-white font-bold select-none shadow-sm">
                   A
                 </div>
-                <div>
+                <div className="flex flex-col">
                   <h1 className="text-base font-bold font-serif italic tracking-tight text-[#2D2C2A] dark:text-white flex items-center gap-1.5 select-none">
                     Aura Workspace <Sparkle className="w-3.5 h-3.5 text-[#D97757] animate-pulse" />
                   </h1>
+                  <a
+                    href="https://www.siddhantmohanty.in/"
+                    target="_blank"
+                    rel="noreferrer"
+                    className="text-[9px] text-[#7A756E] dark:text-zinc-500 hover:text-[#D97757] dark:hover:text-[#D97757] transition-colors -mt-0.5"
+                  >
+                    Created by Siddhant Mohanty
+                  </a>
                 </div>
               </div>
 
@@ -1496,6 +1576,11 @@ export default function App() {
                     onSaveTask={handleSaveTask}
                     onCreateGoal={handleCreateGoal}
                     onDecomposeGoal={handleDecomposeGoal}
+                    onDeleteTask={async (id: string) => { await executeDeleteTask(id); }}
+                    onDeleteGoal={handleDeleteGoal}
+                    onPrioritizeTasks={() => handleAiPrioritize()}
+                    onCreateNote={(c: string) => handleSaveNote(c).then()}
+                    onExtractNote={handleExtractFromNoteContent}
                   />
                 </div>
               </div>
@@ -1528,17 +1613,26 @@ export default function App() {
                         <div className="space-y-1.5">
                           {draftConfirmations.map((draft, idx) => (
                             <div key={idx} className="flex items-center justify-between gap-2 p-2 rounded-xl bg-white dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800 text-xs">
-                              <span className="font-medium text-zinc-700 dark:text-zinc-200 truncate max-w-[200px]">
+                              <span className="font-medium text-zinc-700 dark:text-zinc-200 truncate max-w-[150px]" title={draft.title}>
                                 {draft.title}
                               </span>
-                              <a
-                                href={draft.gmailLink}
-                                target="_blank"
-                                rel="noreferrer"
-                                className="px-2.5 py-1 rounded-lg bg-zinc-950 dark:bg-zinc-100 hover:opacity-90 text-white dark:text-zinc-950 text-[10px] font-bold transition-all cursor-pointer inline-flex items-center gap-1"
-                              >
-                                <span>Open Drafts</span>
-                              </a>
+                              <div className="flex items-center gap-1.5 shrink-0">
+                                <a
+                                  href={draft.gmailLink}
+                                  target="_blank"
+                                  rel="noreferrer"
+                                  className="px-2.5 py-1 rounded-lg bg-zinc-950 dark:bg-zinc-100 hover:opacity-90 text-white dark:text-zinc-950 text-[10px] font-bold transition-all cursor-pointer inline-flex items-center"
+                                >
+                                  Open Draft
+                                </a>
+                                <button
+                                  onClick={() => handleDeleteDraft(draft.draftId)}
+                                  className="p-1.5 rounded-lg bg-red-50 text-red-600 hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20 transition-all cursor-pointer"
+                                  title="Delete Draft"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              </div>
                             </div>
                           ))}
                         </div>
@@ -1652,14 +1746,7 @@ export default function App() {
               goals={goals}
             />
 
-            <GmailDraftModal
-              isOpen={isEmailModalOpen}
-              onClose={() => {
-                setIsEmailModalOpen(false);
-                setEmailTaskSource(null);
-              }}
-              task={emailTaskSource}
-            />
+
 
             {/* Custom Premium Confirm Dialog Modal */}
             <AnimatePresence>

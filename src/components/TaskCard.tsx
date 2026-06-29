@@ -39,8 +39,11 @@ export function TaskCard({
   // Parse deadline Urgency and status
   const now = new Date();
   const deadlineDate = new Date(task.deadline);
-  const diffTime = deadlineDate.getTime() - now.getTime();
-  const diffDays = diffTime / (1000 * 60 * 60 * 24);
+  
+  // Calculate calendar day difference in user's local timezone
+  const todayDate = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const dueDate = new Date(deadlineDate.getFullYear(), deadlineDate.getMonth(), deadlineDate.getDate());
+  const diffDays = (dueDate.getTime() - todayDate.getTime()) / (1000 * 60 * 60 * 24);
 
   const isDone = task.status === "done";
   
@@ -61,6 +64,12 @@ export function TaskCard({
   // Link Goal
   const linkedGoal = goals.find(g => g.id === task.goal_id);
 
+  // Check if today
+  const todayStr = new Date().toISOString().split("T")[0];
+  const localTodayStr = new Date().toLocaleDateString('en-CA');
+  const datesToCheck = [task.scheduled_start, task.scheduled_end, task.deadline].filter(Boolean) as string[];
+  const isToday = datesToCheck.some(d => d.startsWith(todayStr) || d.startsWith(localTodayStr));
+
   // Decide card background, borders and badge colors based on urgency
   let cardClass = "";
   let textClass = "";
@@ -74,27 +83,27 @@ export function TaskCard({
     subTextClass = "text-[#A8A29E] dark:text-zinc-600";
     badgeClass = "bg-zinc-200 border-zinc-300 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400";
     borderClass = "border-[#E8E4DF]/40 dark:border-zinc-800/40";
-  } else if (isOverdue || task.priority_score >= 80) {
-    // High Priority / Urgent: Warm Terracotta/Peach Tone
+  } else if (isOverdue) {
+    // Overdue: Red color
+    cardClass = "bg-red-50 dark:bg-red-950/30 border-red-200 dark:border-red-900/40 shadow-sm";
+    textClass = "text-red-900 dark:text-red-200";
+    subTextClass = "text-red-700 dark:text-red-300/70";
+    badgeClass = "bg-red-500 text-white border-red-600";
+    borderClass = "border-red-200 dark:border-red-900/40";
+  } else if (isToday) {
+    // Today: Green bg card
+    cardClass = "bg-emerald-50 dark:bg-[#20271e] border-emerald-200 dark:border-emerald-900/30 shadow-sm";
+    textClass = "text-emerald-900 dark:text-emerald-100";
+    subTextClass = "text-emerald-700 dark:text-emerald-200/70";
+    badgeClass = "bg-emerald-500/10 border-emerald-500/20 text-emerald-800 dark:text-emerald-300";
+    borderClass = "border-emerald-200 dark:border-emerald-900/30";
+  } else {
+    // Future: Brownish background (currently used for High Priority)
     cardClass = "bg-[#EBCFB2] dark:bg-[#3d2e24] border-[#8C6B4F]/25 dark:border-amber-700/30 shadow-sm";
     textClass = "text-[#2D2C2A] dark:text-amber-100";
     subTextClass = "text-[#8C6B4F] dark:text-amber-200/70";
     badgeClass = "bg-[#D97757] text-white";
     borderClass = "border-[#8C6B4F]/20 dark:border-amber-700/20";
-  } else if (task.priority_score >= 50) {
-    // Medium Priority: Soft Coral/Rose Tone
-    cardClass = "bg-[#F2D7D0] dark:bg-[#382321] border-[#8C4F4F]/25 dark:border-rose-900/30 shadow-sm";
-    textClass = "text-[#2D2C2A] dark:text-rose-100";
-    subTextClass = "text-[#8C4F4F] dark:text-rose-200/70";
-    badgeClass = "bg-[#D97757]/15 border-[#D97757]/30 text-[#D97757] dark:text-rose-300";
-    borderClass = "border-[#8C4F4F]/20 dark:border-rose-900/20";
-  } else {
-    // Low Priority / Calm: Sage Green Tone
-    cardClass = "bg-[#D4DBCB] dark:bg-[#20271e] border-[#5A644D]/25 dark:border-emerald-900/30 shadow-sm";
-    textClass = "text-[#2D2C2A] dark:text-emerald-100";
-    subTextClass = "text-[#5A644D] dark:text-emerald-200/70";
-    badgeClass = "bg-[#5A644D]/10 border-[#5A644D]/20 text-[#5A644D] dark:text-emerald-300";
-    borderClass = "border-[#5A644D]/20 dark:border-[#5A644D]/20";
   }
 
   // Set standard urgencyStatusText
@@ -103,8 +112,10 @@ export function TaskCard({
     urgencyStatusText = "Completed";
   } else if (isOverdue) {
     urgencyStatusText = "Overdue";
-  } else if (diffDays <= 1) {
+  } else if (diffDays === 0) {
     urgencyStatusText = "Due Today";
+  } else if (diffDays === 1) {
+    urgencyStatusText = "Due Tomorrow";
   } else if (diffDays <= 3) {
     urgencyStatusText = "Due Soon";
   }
@@ -244,7 +255,7 @@ export function TaskCard({
                     </span>
                     <span className="inline-flex items-center gap-0.5 font-semibold" id={`task-updated-deadline-${task.id}`}>
                       <Calendar className="w-3 h-3 opacity-60" />
-                      Due: {formatDeadline(task.scheduled_end)}
+                      Due: {formatDeadline(task.deadline)}
                     </span>
                   </>
                 ) : (

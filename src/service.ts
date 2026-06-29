@@ -494,7 +494,8 @@ export async function triggerAiPrioritization(
         tasks: allTasks, 
         goals: allGoals, 
         freeBusy, 
-        currentTime 
+        currentTime,
+        timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
       }),
     });
 
@@ -527,11 +528,9 @@ export async function triggerAiPrioritization(
           updatePayload.completed_at = null;
         }
 
-        // Fix calendar sync bug: write scheduled_end to deadline field on reschedule
-        if (opt.scheduled_end) {
-          updatePayload.deadline = opt.scheduled_end;
-          updatePayload.initial_deadline = match.initial_deadline || match.deadline;
-        }
+        // Fix calendar sync bug: we used to overwrite deadline here. Now we rely on the App.tsx
+        // Google Calendar sync logic to properly use scheduled_start and scheduled_end directly,
+        // leaving the deadline field completely untouched.
 
         await updateDoc(ref, updatePayload);
         updatedTasks.push({

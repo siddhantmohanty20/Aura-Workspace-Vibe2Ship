@@ -132,3 +132,5 @@ The system operates on a Full-Stack architecture with a React client and an Expr
 
 *Built for the **Vibe2Ship Hackathon** | Problem Statement 1: "The Last-Minute Life Saver"*
 *Focus: Using AI to actively solve productivity failures through autonomous action, rather than passive alerts.*
+
+Built by Siddhant Mohanty — [GitHub](https://github.com/siddhantmohanty20) · [LinkedIn](https://www.linkedin.com/in/siddhant-mohanty-132a02257/) · [Portfolio](https://www.siddhantmohanty.in/)

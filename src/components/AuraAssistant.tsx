@@ -24,11 +24,15 @@ interface AuraAssistantProps {
   onSaveTask?: (taskData: any) => Promise<void>;
   onCreateGoal?: (title: string) => Promise<void>;
   onDecomposeGoal?: (title: string) => Promise<void>;
+  onDeleteTask?: (id: string) => Promise<void>;
+  onDeleteGoal?: (id: string) => Promise<void>;
+  onPrioritizeTasks?: () => Promise<void>;
+  onCreateNote?: (content: string) => Promise<void>;
+  onExtractNote?: (content: string) => Promise<void>;
 }
 
-export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCreateGoal, onDecomposeGoal }: AuraAssistantProps) {
+export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCreateGoal, onDecomposeGoal, onDeleteTask, onDeleteGoal, onPrioritizeTasks, onCreateNote, onExtractNote }: AuraAssistantProps) {
   const [isExpanded, setIsExpanded] = useState(false);
-  const [activeTab, setActiveTab] = useState<"text" | "live">("text");
   const [textMessages, setTextMessages] = useState<ChatMessage[]>([
     {
       id: "init",
@@ -39,17 +43,10 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
   ]);
   const [inputText, setInputText] = useState("");
   const [loadingText, setLoadingText] = useState(false);
-
-  // Live dialogue states
-  const [isLiveActive, setIsLiveActive] = useState(false);
-  const [liveTranscript, setLiveTranscript] = useState<{ id: string; speaker: "user" | "aura"; text: string }[]>([]);
-  const [isAuraSpeaking, setIsAuraSpeaking] = useState(false);
-  const [micActive, setMicActive] = useState(false);
-  const [waveHeights, setWaveHeights] = useState<number[]>([15, 15, 15, 15, 15, 15, 15, 15]);
+  const [isListening, setIsListening] = useState(false);
 
   // Speech Recognition (Web Speech API)
   const recognitionRef = useRef<any>(null);
-  const audioIntervalRef = useRef<any>(null);
   const scrollRef = useRef<HTMLDivElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -71,41 +68,19 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
 
   // Focus input when expanding
   useEffect(() => {
-    if (isExpanded && activeTab === "text") {
+    if (isExpanded) {
       setTimeout(() => {
         inputRef.current?.focus();
       }, 100);
     }
-  }, [isExpanded, activeTab]);
+  }, [isExpanded]);
 
   // Scroll to bottom on message
   useEffect(() => {
     if (scrollRef.current) {
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
-  }, [textMessages, liveTranscript]);
-
-  // Audio wave animation
-  useEffect(() => {
-    if (isLiveActive) {
-      audioIntervalRef.current = setInterval(() => {
-        setWaveHeights(prev => {
-          return prev.map(() => {
-            const base = isAuraSpeaking ? 50 : micActive ? 30 : 15;
-            return Math.floor(Math.random() * base) + 12;
-          });
-        });
-      }, 100);
-    } else {
-      if (audioIntervalRef.current) {
-        clearInterval(audioIntervalRef.current);
-      }
-      setWaveHeights([15, 15, 15, 15, 15, 15, 15, 15]);
-    }
-    return () => {
-      if (audioIntervalRef.current) clearInterval(audioIntervalRef.current);
-    };
-  }, [isLiveActive, isAuraSpeaking, micActive]);
+  }, [textMessages]);
 
   // Send message to Express backend chat API
   const handleSendMessage = async (textToSend: string) => {
@@ -168,6 +143,27 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
               });
               onRefreshTasks();
             }
+          } else if (data.action.type === "update_task") {
+            if (onSaveTask) {
+              await onSaveTask({
+                id: data.action.params.id,
+                title: data.action.params.title,
+                description: data.action.params.description || "Updated via Aura Assistant",
+                deadline: data.action.params.deadline,
+                estimated_effort: data.action.params.estimated_effort || 30,
+                goal_id: null
+              });
+            } else {
+              await saveTaskToFirestore({
+                id: data.action.params.id,
+                title: data.action.params.title,
+                description: data.action.params.description || "Updated via Aura Assistant",
+                deadline: data.action.params.deadline,
+                estimated_effort: data.action.params.estimated_effort || 30,
+                goal_id: null
+              });
+              onRefreshTasks();
+            }
           } else if (data.action.type === "create_calendar_event") {
             await createCalendarEvent({
               summary: data.action.params.summary,
@@ -185,6 +181,16 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
             await onCreateGoal(data.action.params.title);
           } else if (data.action.type === "decompose_goal" && onDecomposeGoal) {
             await onDecomposeGoal(data.action.params.title);
+          } else if (data.action.type === "delete_task" && onDeleteTask) {
+            await onDeleteTask(data.action.params.id);
+          } else if (data.action.type === "delete_goal" && onDeleteGoal) {
+            await onDeleteGoal(data.action.params.id);
+          } else if (data.action.type === "prioritize_tasks" && onPrioritizeTasks) {
+            await onPrioritizeTasks();
+          } else if (data.action.type === "create_note" && onCreateNote) {
+            await onCreateNote(data.action.params.content);
+          } else if (data.action.type === "extract_note" && onExtractNote) {
+            await onExtractNote(data.action.params.content);
           }
         } catch (actErr) {
           console.error("Workspace action execution failure:", actErr);
@@ -218,152 +224,47 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
     }
   };
 
-  // Speaks aloud via client synthesis for Voice Conversations
-  const speakAloud = (text: string) => {
-    if (!('speechSynthesis' in window)) return;
-    window.speechSynthesis.cancel();
-    
-    // Clean up markdown markers for natural speech
-    const cleanText = text
-      .replace(/[*_#`\-+]/g, "")
-      .replace(/\[.*?\]/g, "")
-      .substring(0, 150); // limit spoken feedback longevity
-
-    const utterance = new SpeechSynthesisUtterance(cleanText);
-    utterance.onstart = () => setIsAuraSpeaking(true);
-    utterance.onend = () => {
-      setIsAuraSpeaking(false);
-      // Restart mic listening if dialogue is still active
-      if (isLiveActive) {
-        startMicRecognition();
+  const toggleVoiceInput = () => {
+    if (isListening) {
+      if (recognitionRef.current) {
+        recognitionRef.current.stop();
       }
-    };
-    utterance.onerror = () => setIsAuraSpeaking(false);
-    window.speechSynthesis.speak(utterance);
-  };
-
-  const startMicRecognition = () => {
-    if (!('webkitSpeechRecognition' in window) && !('speechRecognition' in window)) {
-      setLiveTranscript(prev => [...prev, { id: `err-${Date.now()}`, speaker: "aura", text: "Voice synthesis and microphone tracking are not supported in your browser context. Please write using text mode instead." }]);
+      setIsListening(false);
       return;
     }
 
     const SpeechRecognition = (window as any).webkitSpeechRecognition || (window as any).speechRecognition;
-    const rec = new SpeechRecognition();
-    rec.continuous = false;
-    rec.interimResults = false;
-    rec.lang = "en-US";
-
-    rec.onstart = () => {
-      setMicActive(true);
-    };
-
-    rec.onresult = async (event: any) => {
-      const text = event.results[0][0].transcript;
-      if (!text.trim()) return;
-
-      setLiveTranscript(prev => [...prev, { id: `usr-${Date.now()}`, speaker: "user", text }]);
-      setMicActive(false);
-
-      // Call assistant
-      try {
-        const response = await fetch("/api/chat", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            messages: [{ role: "user", text }],
-            activeTasks: tasks.filter(t => t.status !== "archived"),
-            activeGoals: goals.filter(g => g.status !== "archived")
-          })
-        });
-
-        if (!response.ok) throw new Error();
-        const data = await response.json();
-
-        // Process live voice guided workspace action if available
-        if (data.action) {
-          try {
-            if (data.action.type === "create_task") {
-              if (onSaveTask) {
-                await onSaveTask({
-                  title: data.action.params.title,
-                  description: data.action.params.description || "Created via Aura Voice Assistant",
-                  deadline: data.action.params.deadline,
-                  estimated_effort: data.action.params.estimated_effort || 30,
-                  goal_id: null
-                });
-              } else {
-                await saveTaskToFirestore({
-                  title: data.action.params.title,
-                  description: data.action.params.description || "Created via Aura Voice Assistant",
-                  deadline: data.action.params.deadline,
-                  estimated_effort: data.action.params.estimated_effort || 30,
-                  goal_id: null
-                });
-                onRefreshTasks();
-              }
-            } else if (data.action.type === "create_calendar_event") {
-              await createCalendarEvent({
-                summary: data.action.params.summary,
-                description: data.action.params.description || "Scheduled via Aura Voice Assistant",
-                start: data.action.params.start,
-                end: data.action.params.end
-              });
-            } else if (data.action.type === "create_gmail_draft") {
-              await createGmailDraft(
-                data.action.params.to,
-                data.action.params.subject,
-                data.action.params.bodyText
-              );
-            } else if (data.action.type === "create_goal" && onCreateGoal) {
-              await onCreateGoal(data.action.params.title);
-            } else if (data.action.type === "decompose_goal" && onDecomposeGoal) {
-              await onDecomposeGoal(data.action.params.title);
-            }
-          } catch (actErr) {
-            console.error("Workspace voice action execution failure:", actErr);
-          }
-        }
-        
-        setLiveTranscript(prev => [...prev, { id: `aur-${Date.now()}`, speaker: "aura", text: data.text }]);
-        speakAloud(data.text);
-      } catch {
-        const fallback = "System compilation error. I couldn't transmit voice telemetry.";
-        setLiveTranscript(prev => [...prev, { id: `aur-${Date.now()}`, speaker: "aura", text: fallback }]);
-        speakAloud(fallback);
-      }
-    };
-
-    rec.onerror = () => {
-      setMicActive(false);
-    };
-
-    rec.onend = () => {
-      setMicActive(false);
-    };
-
-    recognitionRef.current = rec;
-    rec.start();
-  };
-
-  const handleToggleLiveMode = () => {
-    if (isLiveActive) {
-      setIsLiveActive(false);
-      setMicActive(false);
-      setIsAuraSpeaking(false);
-      if (recognitionRef.current) {
-        recognitionRef.current.abort();
-      }
-      if ('speechSynthesis' in window) {
-        window.speechSynthesis.cancel();
-      }
-    } else {
-      setIsLiveActive(true);
-      setLiveTranscript([
-        { id: "init-live", speaker: "aura", text: "Deep dialogue initialized. I'm connected to the workspace server. Aura Live API ready. Speak whenever you are ready." }
-      ]);
-      speakAloud("Dialogue connection active. Ready to coordinate.");
+    if (!SpeechRecognition) {
+      console.error("Speech Recognition not supported in this browser.");
+      return;
     }
+
+    setIsListening(true);
+    const recognition = new SpeechRecognition();
+    recognitionRef.current = recognition;
+    recognition.lang = "en-US";
+    recognition.interimResults = false;
+    recognition.maxAlternatives = 1;
+
+    recognition.onresult = (event: any) => {
+      const transcript = event.results[0][0].transcript;
+      if (transcript && transcript.trim().length > 0) {
+        setInputText(transcript);
+        handleSendMessage(transcript);
+      }
+      setIsListening(false);
+    };
+
+    recognition.onerror = (event: any) => {
+      console.error("Speech recognition error", event);
+      setIsListening(false);
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+    };
+
+    recognition.start();
   };
 
   if (!isExpanded) {
@@ -407,15 +308,19 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
         </div>
         <div className="flex items-center gap-2 flex-shrink-0">
           <button 
-            className="p-2 rounded-xl bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:text-[#D97757] dark:hover:text-zinc-300 transition-all cursor-pointer"
-            title="Open Voice Chat"
+            className={`p-2 rounded-xl transition-all cursor-pointer ${
+              isListening
+                ? "bg-rose-500 text-white animate-pulse"
+                : "bg-zinc-50 dark:bg-zinc-800 text-zinc-400 dark:text-zinc-500 hover:text-[#D97757] dark:hover:text-zinc-300"
+            }`}
+            title="Voice Input"
             onClick={(e) => {
               e.stopPropagation();
-              setActiveTab("live");
-              setIsExpanded(true);
+              if (!isExpanded) setIsExpanded(true);
+              toggleVoiceInput();
             }}
           >
-            <Mic className="w-4 h-4" />
+            {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
           </button>
           <div className="p-2 rounded-xl bg-[#D97757]/10 text-[#D97757] font-bold text-xs flex items-center gap-1 group-hover:bg-[#D97757]/15 transition-all">
             <span>Open</span>
@@ -431,30 +336,13 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
       {/* Tab Switcher Headers */}
       <div className="flex px-4 pt-3 border-b border-[#E8E4DF] dark:border-zinc-800/60 justify-between items-center bg-[#F7F5F2]/60 dark:bg-zinc-900/20 rounded-t-[28px]">
         <div className="flex gap-1.5">
-          <button
-            onClick={() => setActiveTab("text")}
-            className={`px-3 py-2 text-xs font-bold leading-tight font-display border-b-2 transition-all ${
-              activeTab === "text" 
-                ? "border-[#D97757] text-[#2D2C2A] dark:text-zinc-100" 
-                : "border-transparent text-zinc-400 hover:text-zinc-600"
-            }`}
+          <div
+            className="px-3 py-2 text-xs font-bold leading-tight font-display border-b-2 border-[#D97757] text-[#2D2C2A] dark:text-zinc-100 transition-all"
           >
             <span className="flex items-center gap-1.5">
               <MessagesSquare className="w-3.5 h-3.5 text-[#D97757]" /> Workspace Dialogue
             </span>
-          </button>
-          <button
-            onClick={() => setActiveTab("live")}
-            className={`px-3 py-2 text-xs font-bold leading-tight font-display border-b-2 transition-all ${
-              activeTab === "live" 
-                ? "border-[#D97757] text-[#2D2C2A] dark:text-zinc-100" 
-                : "border-transparent text-zinc-400 hover:text-zinc-600"
-            }`}
-          >
-            <span className="flex items-center gap-1.5">
-              <Sparkles className="w-3.5 h-3.5 text-[#D97757] animate-pulse" /> Live Voice API
-            </span>
-          </button>
+          </div>
         </div>
 
         <div className="flex items-center gap-2 mb-2">
@@ -477,163 +365,86 @@ export function AuraAssistant({ tasks, goals, onRefreshTasks, onSaveTask, onCrea
 
       {/* Main Container Area */}
       <div className="flex-1 overflow-hidden relative flex flex-col h-full bg-transparent">
-        {activeTab === "text" ? (
-          <>
-            {/* Scrollable messages thread */}
-            <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
-              {textMessages.map((msg) => (
-                <div
-                  key={msg.id}
-                  className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
-                >
-                  <div className={`max-w-[85%] rounded-[20px] px-4 py-3 text-sm leading-relaxed ${
-                    msg.role === "user"
-                      ? "bg-[#D97757] text-white dark:bg-zinc-100 dark:text-zinc-950 font-bold shadow-sm animate-fade-in"
-                      : "bg-white/80 dark:bg-zinc-900/60 text-[#2D2C2A] dark:text-zinc-300 border border-[#E8E4DF] dark:border-zinc-800"
-                  }`}>
-                    {msg.role === "user" ? (
-                      <p className="whitespace-pre-line select-text font-sans text-white dark:text-zinc-950 font-medium leading-relaxed">
-                        {msg.text}
-                      </p>
-                    ) : (
-                      <p className="whitespace-pre-line select-text font-serif italic text-[#2D2C2A]/95 dark:text-neutral-100 font-medium leading-relaxed">
-                        "{msg.text}"
-                      </p>
-                    )}
-                    <span className="block text-[9px] mt-1.5 opacity-50 text-right font-mono">
-                      {msg.timestamp}
-                    </span>
-                  </div>
-                </div>
-              ))}
-
-              {loadingText && (
-                <div className="flex justify-start">
-                  <div className="bg-white/80 dark:bg-zinc-900/60 rounded-2xl px-4 py-3 flex items-center gap-2 border border-[#E8E4DF] dark:border-zinc-800/40">
-                    <Loader2 className="w-4 h-4 animate-spin text-[#D97757]" />
-                    <span className="text-xs text-[#5A644D] dark:text-zinc-400 font-mono tracking-widest uppercase font-bold">Consulting Core Brain...</span>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Input Footer Form */}
-            <div className="p-3 border-t border-[#E8E4DF] dark:border-zinc-800/60 bg-white/40 dark:bg-transparent flex-shrink-0">
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  handleSendMessage(inputText);
-                }}
-                className="flex items-center gap-2 relative"
+        <>
+          {/* Scrollable messages thread */}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto p-4 space-y-4">
+            {textMessages.map((msg) => (
+              <div
+                key={msg.id}
+                className={`flex ${msg.role === "user" ? "justify-end" : "justify-start"}`}
               >
-                <input
-                  ref={inputRef}
-                  type="text"
-                  placeholder="Ask Aura: 'Prioritize my day' or 'Draft a review mail'..."
-                  value={inputText}
-                  onChange={(e) => setInputText(e.target.value)}
-                  className="flex-1 pl-4 pr-12 py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-800 dark:text-zinc-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all font-sans"
-                />
-                <button
-                  type="submit"
-                  disabled={!inputText.trim() || loadingText}
-                  className="absolute right-2 p-2 text-zinc-400 hover:text-[#D97757] dark:hover:text-zinc-200 disabled:opacity-30 transition-colors"
-                >
-                  <Send className="w-4 h-4" />
-                </button>
-              </form>
-            </div>
-          </>
-        ) : (
-          /* Live Voice Dialog tab */
-          <div className="p-4 flex flex-col h-full space-y-4 bg-transparent">
-            {!isLiveActive ? (
-              <div className="flex-1 flex flex-col items-center justify-center text-center p-6 space-y-4">
-                {/* Glowing AI Orb Visualizer */}
-                <div className="relative">
-                  <div className="w-16 h-16 rounded-full bg-[#D97757]/10 dark:bg-indigo-500/5 flex items-center justify-center border border-[#D97757]/30">
-                    <Mic className="w-6 h-6 text-[#D97757]" />
-                  </div>
-                  <div className="absolute inset-0 w-16 h-16 rounded-full border border-[#D97757]/20 animate-ping" />
+                <div className={`max-w-[85%] rounded-[20px] px-4 py-3 text-sm leading-relaxed ${
+                  msg.role === "user"
+                    ? "bg-[#D97757] text-white dark:bg-zinc-100 dark:text-zinc-950 font-bold shadow-sm animate-fade-in"
+                    : "bg-white/80 dark:bg-zinc-900/60 text-[#2D2C2A] dark:text-zinc-300 border border-[#E8E4DF] dark:border-zinc-800"
+                }`}>
+                  {msg.role === "user" ? (
+                    <p className="whitespace-pre-line select-text font-sans text-white dark:text-zinc-950 font-medium leading-relaxed">
+                      {msg.text}
+                    </p>
+                  ) : (
+                    <p className="whitespace-pre-line select-text font-serif italic text-[#2D2C2A]/95 dark:text-neutral-100 font-medium leading-relaxed">
+                      "{msg.text}"
+                    </p>
+                  )}
+                  <span className="block text-[9px] mt-1.5 opacity-50 text-right font-mono">
+                    {msg.timestamp}
+                  </span>
                 </div>
-
-                <div className="space-y-1.5 max-w-[260px]">
-                  <h4 className="text-sm font-bold font-display text-[#2D2C2A] dark:text-zinc-200">
-                    Start Voice Stream
-                  </h4>
-                  <p className="text-xs text-zinc-500 dark:text-zinc-500 leading-relaxed">
-                    Direct voice processing simulation connected to Gemini models. Speak whenever you are ready.
-                  </p>
-                </div>
-
-                <button
-                  onClick={handleToggleLiveMode}
-                  className="px-6 py-2.5 rounded-xl text-xs font-bold text-white bg-[#D97757] hover:bg-[#D97757]/90 active:scale-95 transition-all w-44 shadow-sm cursor-pointer"
-                >
-                  Connect Dialogue
-                </button>
               </div>
-            ) : (
-              <div className="flex-1 flex flex-col h-full overflow-hidden">
-                {/* Transcript feed */}
-                <div ref={scrollRef} className="flex-1 overflow-y-auto mb-4 border border-[#E8E4DF] dark:border-zinc-800/40 rounded-[20px] p-3.5 bg-[#F7F5F2]/50 dark:bg-zinc-950/20 space-y-2">
-                  {liveTranscript.map((tr) => (
-                    <div key={tr.id} className="text-xs">
-                      <span className={`font-semibold uppercase tracking-wider text-[9px] mr-1 ${tr.speaker === "aura" ? "text-[#5A644D]" : "text-[#D97757]"}`}>
-                        {tr.speaker === "aura" ? "AURA >>" : "USER >>"}
-                      </span>
-                      <span className="text-zinc-700 dark:text-zinc-300 font-sans">{tr.text}</span>
-                    </div>
-                  ))}
-                </div>
+            ))}
 
-                {/* Live sound Wave animation and controls */}
-                <div className="bg-[#F7F5F2] dark:bg-zinc-900/30 rounded-[22px] p-4 flex flex-col items-center justify-center space-y-4 border border-[#E8E4DF] dark:border-zinc-800/30 flex-shrink-0">
-                  <div className="flex items-center gap-1.5 h-12 justify-center w-full">
-                    {waveHeights.map((h, i) => (
-                      <motion.div
-                        key={i}
-                        animate={{ height: h }}
-                        transition={{ duration: 0.1 }}
-                        className={`w-1 rounded-full ${isAuraSpeaking ? "bg-[#5A644D] shadow-[0_0_8px_rgba(90,100,77,0.5)]" : micActive ? "bg-[#D97757]" : "bg-zinc-300 dark:bg-zinc-700"}`}
-                      />
-                    ))}
-                  </div>
-
-                  <div className="flex items-center justify-between w-full border-t border-[#E8E4DF] dark:border-zinc-800/40 pt-3">
-                    <div className="flex items-center gap-1.5">
-                      <div className={`w-2.5 h-2.5 rounded-full ${micActive || isAuraSpeaking ? "bg-[#5A644D] animate-pulse" : "bg-zinc-400"}`} />
-                      <span className="text-[10px] uppercase font-bold tracking-wider text-zinc-550 dark:text-zinc-400 font-mono">
-                        {isAuraSpeaking ? "Voice Synthesis" : micActive ? "Listening" : "Coordinated"}
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      {/* Manual Push-To-Talk / listen icon */}
-                      {!isAuraSpeaking && (
-                        <button
-                          onClick={startMicRecognition}
-                          disabled={micActive}
-                          className={`p-2 rounded-full transition-all ${micActive ? "bg-[#5A644D] text-white" : "bg-white/80 hover:bg-neutral-200/50 dark:bg-zinc-800 dark:text-zinc-300 border border-[#E8E4DF] dark:border-zinc-750"}`}
-                          title="Trigger Listen Session"
-                        >
-                          <Mic className="w-4 h-4" />
-                        </button>
-                      )}
-
-                      <button
-                        onClick={handleToggleLiveMode}
-                        className="px-4 py-1.5 rounded-xl text-[10px] font-bold text-white bg-rose-600 hover:bg-rose-500 active:scale-95 transition-all shadow-sm cursor-pointer"
-                      >
-                        Disconnect Stream
-                      </button>
-                    </div>
-                  </div>
+            {loadingText && (
+              <div className="flex justify-start">
+                <div className="bg-white/80 dark:bg-zinc-900/60 rounded-2xl px-4 py-3 flex items-center gap-2 border border-[#E8E4DF] dark:border-zinc-800/40">
+                  <Loader2 className="w-4 h-4 animate-spin text-[#D97757]" />
+                  <span className="text-xs text-[#5A644D] dark:text-zinc-400 font-mono tracking-widest uppercase font-bold">Consulting Core Brain...</span>
                 </div>
               </div>
             )}
           </div>
-        )}
+
+          {/* Input Footer Form */}
+          <div className="p-3 border-t border-[#E8E4DF] dark:border-zinc-800/60 bg-white/40 dark:bg-transparent flex-shrink-0">
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                handleSendMessage(inputText);
+              }}
+              className="flex items-center gap-2 relative"
+            >
+              <input
+                ref={inputRef}
+                type="text"
+                placeholder="Ask Aura: 'Prioritize my day' or 'Draft a review mail'..."
+                value={inputText}
+                onChange={(e) => setInputText(e.target.value)}
+                className="flex-1 pl-4 pr-[88px] py-3 rounded-xl border border-[#E8E4DF] dark:border-zinc-800 bg-white dark:bg-zinc-950 text-zinc-800 dark:text-zinc-200 text-xs focus:outline-none focus:ring-2 focus:ring-[#D97757]/15 focus:border-[#D97757] transition-all font-sans"
+              />
+              <div className="absolute right-2 flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={toggleVoiceInput}
+                  className={`p-2 rounded-lg transition-colors ${
+                    isListening
+                      ? "text-rose-500 bg-rose-500/10 animate-pulse"
+                      : "text-zinc-400 hover:text-[#D97757] dark:hover:text-zinc-200"
+                  }`}
+                  title={isListening ? "Stop listening" : "Start voice input"}
+                >
+                  {isListening ? <MicOff className="w-4 h-4" /> : <Mic className="w-4 h-4" />}
+                </button>
+                <button
+                  type="submit"
+                  disabled={!inputText.trim() || loadingText}
+                  className="p-2 text-zinc-400 hover:text-[#D97757] dark:hover:text-zinc-200 disabled:opacity-30 transition-colors"
+                >
+                  <Send className="w-4 h-4" />
+                </button>
+              </div>
+            </form>
+          </div>
+        </>
       </div>
     </div>
   );

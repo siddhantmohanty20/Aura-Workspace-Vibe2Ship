@@ -65,10 +65,35 @@ export async function createCalendarEvent(event: CalendarEvent): Promise<any> {
   });
 
   if (!response.ok) {
-    throw new Error(`Google Calendar Event Creation error: ${response.statusText}`);
+    const errText = await response.text();
+    throw new Error(`Google Calendar Event Creation error: ${response.statusText} - ${errText}`);
   }
 
   return response.json();
+}
+
+/**
+ * Delete a draft in user's Gmail box
+ */
+export async function deleteGmailDraft(draftId: string): Promise<void> {
+  const token = await getAccessToken();
+  if (!token) {
+    throw new Error("No Google Access Token found. Please re-authenticate.");
+  }
+
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/drafts/${draftId}`;
+  
+  const response = await fetch(url, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  if (!response.ok) {
+    console.error(`Failed to delete draft ${draftId}:`, await response.text());
+    throw new Error("Failed to delete Gmail draft.");
+  }
 }
 
 /**
