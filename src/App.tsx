@@ -325,8 +325,16 @@ export default function App() {
 
     // 4. Task has a scheduled slot. Create or update calendar event
     try {
-      const startTime = new Date(taskData.scheduled_start);
-      const endTime = new Date(taskData.scheduled_end);
+      let startTime = new Date(taskData.scheduled_start);
+      let endTime = new Date(taskData.scheduled_end);
+
+      // Ensure minimum 30-minute duration to prevent timeRangeEmpty Google Calendar API errors
+      if (startTime.getTime() >= endTime.getTime()) {
+        const effortMinutes = Math.max(Number(taskData.estimated_effort) || 30, 30);
+        endTime = new Date(startTime.getTime() + effortMinutes * 60 * 1000);
+        // Also update taskData so it gets saved to Firestore with valid times
+        taskData.scheduled_end = endTime.toISOString();
+      }
 
       const eventData = {
         summary: taskData.title,
@@ -556,16 +564,26 @@ export default function App() {
   };
 
   // Internal task deletion (no user prompt, no local state update)
-  const executeDeleteTask = async (id: string): Promise<string | null> => {
-    const taskObj = tasks.find(t => t.id === id);
+  const executeDeleteTask = async (id: string, taskObj?: Task): Promise<string | null> => {
+    let task = taskObj || tasksRef.current.find(t => t.id === id);
+    
+    // Fetch latest from Firestore just to be completely sure we have the latest calendarEventId
+    try {
+      const freshTasks = await getTasksFromFirestore();
+      const freshTask = freshTasks.find(t => t.id === id);
+      if (freshTask) task = freshTask;
+    } catch (e) {
+      console.warn("Could not fetch fresh task for delete, using local state.", e);
+    }
+
     let calendarWarning = null;
 
-    if (isAuthenticated && taskObj?.calendarEventId) {
+    if (isAuthenticated && task?.calendarEventId) {
       try {
-        await deleteCalendarEvent(taskObj.calendarEventId);
+        await deleteCalendarEvent(task.calendarEventId);
       } catch (err: any) {
         console.warn("Failed to delete Calendar event during task delete:", err);
-        calendarWarning = `Task "${taskObj?.title || id}" deleted, but failed to delete Google Calendar event.`;
+        calendarWarning = `Task "${task?.title || id}" deleted, but failed to delete Google Calendar event.`;
       }
     }
 
@@ -581,6 +599,7 @@ export default function App() {
 
   // Delete task
   const handleDeleteTask = async (id: string) => {
+    const taskObj = tasksRef.current.find(t => t.id === id);
     const confirmed = await askConfirmation(
       "Archive Task",
       "Are you sure you want to archive this task? It will be moved to Archive Logs and removed from Google Calendar."
@@ -588,14 +607,26 @@ export default function App() {
     if (!confirmed) return;
 
     try {
-      const calendarWarning = await executeDeleteTask(id);
+      const calendarWarning = await executeDeleteTask(id, taskObj);
       setTasks(prev => prev.map(t => t.id === id ? { ...t, status: "archived", calendarEventId: null } : t));
       
+      const draftsToDelete = draftConfirmations.filter(d => d.taskId === id);
+      for (const d of draftsToDelete) {
+        try { await deleteGmailDraft(d.draftId); } catch (e) { console.error(e); }
+      }
+      if (draftsToDelete.length > 0) {
+        setDraftConfirmations(prev => prev.filter(d => d.taskId !== id));
+      }
+
       if (calendarWarning) {
         triggerAlert("error", calendarWarning);
       } else {
         triggerAlert("success", "Task deleted.");
       }
+
+      const refreshedTasks = await getTasksFromFirestore();
+      setTasks(refreshedTasks);
+      handleAiPrioritize(refreshedTasks);
     } catch {
       triggerAlert("error", "Error compiling delete instruction.");
     }
@@ -628,10 +659,20 @@ export default function App() {
     const warnings: string[] = [];
     for (const t of linkedTasks) {
       try {
-        const warning = await executeDeleteTask(t.id);
+        const warning = await executeDeleteTask(t.id, t);
         if (warning) {
           warnings.push(warning);
         }
+        
+        // Clean up drafts
+        const draftsToDelete = draftConfirmations.filter(d => d.taskId === t.id);
+        for (const d of draftsToDelete) {
+          try { await deleteGmailDraft(d.draftId); } catch (e) { console.error(e); }
+        }
+        if (draftsToDelete.length > 0) {
+          setDraftConfirmations(prev => prev.filter(d => d.taskId !== t.id));
+        }
+
       } catch (err) {
         console.warn(`Failed to execute delete for subtask ${t.id}:`, err);
       }
@@ -653,6 +694,10 @@ export default function App() {
       } else {
         triggerAlert("success", "Goal and associated subtasks deleted successfully.");
       }
+
+      const refreshedTasks = await getTasksFromFirestore();
+      setTasks(refreshedTasks);
+      handleAiPrioritize(refreshedTasks);
     } catch {
       triggerAlert("error", "Error compiling drop goal instruction.");
     }
@@ -825,11 +870,25 @@ export default function App() {
   const handleTasksExtracted = async (extractedTasks: any[]) => {
     try {
       for (const t of extractedTasks) {
+        let deadline = t.deadline;
+        if (!deadline || isNaN(Date.parse(deadline))) {
+          // If invalid or missing, default to 2 days from now at 12:00 PM
+          const defaultDate = new Date();
+          defaultDate.setDate(defaultDate.getDate() + 2);
+          defaultDate.setHours(12, 0, 0, 0);
+          deadline = defaultDate.toISOString();
+        }
+        
+        let estimated_effort = Number(t.estimated_effort);
+        if (!estimated_effort || isNaN(estimated_effort) || estimated_effort <= 0) {
+          estimated_effort = 60; // Default to 60 minutes
+        }
+
         let taskFields = {
           title: t.title,
           description: t.description,
-          deadline: t.deadline,
-          estimated_effort: t.estimated_effort,
+          deadline,
+          estimated_effort,
           goal_id: null,
           status: "not_started" as const,
           calendarEventId: null as string | null
@@ -887,12 +946,17 @@ export default function App() {
 
   const handleDeleteDraft = async (draftId: string) => {
     try {
+      const draftInfo = draftConfirmations.find(d => d.draftId === draftId);
+      if (draftInfo) {
+        await executeDeleteTask(draftInfo.taskId);
+        setTasks(prev => prev.map(t => t.id === draftInfo.taskId ? { ...t, status: "archived", calendarEventId: null } : t));
+      }
       await deleteGmailDraft(draftId);
       setDraftConfirmations(prev => prev.filter(d => d.draftId !== draftId));
-      triggerAlert("success", "Draft successfully removed.");
+      triggerAlert("success", "Draft and associated task successfully removed.");
     } catch (err) {
       console.error(err);
-      triggerAlert("error", "Failed to remove draft from Gmail.");
+      triggerAlert("error", "Failed to remove draft and task.");
     }
   };
 
@@ -988,8 +1052,18 @@ export default function App() {
       
       // Push event creations/updates to Google Calendar so task event IDs stay correctly linked
       const finalizedTasks: Task[] = [];
+      const freshCheckTasks = await getTasksFromFirestore();
+      
       for (const t of updated) {
         let taskCopy = { ...t };
+        
+        // Skip updating if it was archived while AI was thinking
+        const freshTask = freshCheckTasks.find(ft => ft.id === taskCopy.id);
+        if (freshTask && freshTask.status === "archived") {
+          finalizedTasks.push(freshTask);
+          continue;
+        }
+
         const currentTasks = tasksRef.current;
         const existingTask = tasksToOptimize.find(item => item.id === taskCopy.id) || currentTasks.find(item => item.id === taskCopy.id);
         
@@ -1016,7 +1090,7 @@ export default function App() {
           taskCopy.original_deadline = undefined;
         }
 
-        if (taskCopy.status !== "done") {
+        if (taskCopy.status !== "done" && taskCopy.status !== "archived") {
           let shouldBeOverdue = false;
           if (new Date(taskCopy.deadline).getTime() < Date.now()) {
             shouldBeOverdue = true;
@@ -1032,7 +1106,7 @@ export default function App() {
         }
 
         let syncFailed = false;
-        if (isAuthenticated && taskCopy.status !== "done" && taskCopy.scheduled_start) {
+        if (isAuthenticated && taskCopy.status !== "done" && taskCopy.status !== "archived" && taskCopy.scheduled_start) {
           // Sync to calendar if slot changed, estimated effort changed, or calendar event is missing
           if (
             !existingTask || 
@@ -1128,26 +1202,19 @@ export default function App() {
   const handleOpenComposeEmail = async (task: Task) => {
     triggerAlert("success", "Generating and saving draft...");
     try {
-      let subject = `Aura Focus: Workspace Action Item - ${task.title}`;
-      let body = "";
+      const deadlineText = new Date(task.deadline).toLocaleString();
+      const subject = `Update regarding ${task.title} - Adjusted Timeline`;
+      const body = `Dear Sir/Ma'am,
 
-      try {
-        const res = await fetch("/api/generate-email", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ task })
-        });
-        const data = await res.json();
-        if (data.subject) subject = data.subject;
-        if (data.body) body = data.body;
-      } catch (genErr) {
-        console.warn("AI Email generation failed, using template:", genErr);
-      }
+I am writing to provide a quick update on the progress of ${task.title}.
 
-      if (!body) {
-        const deadlineText = new Date(task.deadline).toLocaleString();
-        body = `Hi Team,\n\nI am currently working on the following workspace task within Aura:\n\nTask: ${task.title}\nDescription: ${task.description || "No description provided."}\nDeadline: ${deadlineText}\nEstimated effort: ${task.estimated_effort} minutes\nPriority Score: ${task.priority_score}%\n\nPlease let me know if there are any roadblocks or adjustments required.\n\nBest regards,\nAura Workspace Compiler`;
-      }
+We have encountered a slight delay and I am actively working through this, but it will require a bit more time to ensure the final result meets our quality standards.
+
+I now expect to deliver ${task.title} to you by ${deadlineText}.
+
+I apologize for any inconvenience this may cause to your schedule. Please let me know if you have any questions or if we need to jump on a quick call to adjust any dependent timelines.
+
+Best regards,`;
 
       const draftResult = await createGmailDraft("", subject, body);
       
@@ -1182,7 +1249,7 @@ export default function App() {
   };
 
   const isOverdueTask = (t: Task) => {
-    if (t.status === "done") return false;
+    if (t.status === "done" || t.status === "archived") return false;
     const nowTime = Date.now();
     // Overdue display if:
     // 1. Current time is past the current deadline

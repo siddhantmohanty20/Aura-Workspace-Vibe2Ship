@@ -148,7 +148,7 @@ app.post("/api/prioritize", async (req, res) => {
   // Identify tasks to protect: incomplete tasks whose scheduled end time is in the future relative to "now"
   // (This covers both currently active scheduled tasks and future scheduled tasks whose slots haven't ended yet)
   const protectedTasks = tasks.filter((t: any) => {
-    if (t.status === "done") return false;
+    if (t.status === "done" || t.status === "archived") return false;
     if (!t.scheduled_start || !t.scheduled_end) return false;
     const end = new Date(t.scheduled_end);
     return now.getTime() < end.getTime();
@@ -236,7 +236,7 @@ app.post("/api/prioritize", async (req, res) => {
       const deadlineDate = new Date(t.deadline);
       let calculatedStatus = t.status;
       
-      if (t.status !== "done") {
+      if (t.status !== "done" && t.status !== "archived") {
         if (deadlineDate.getTime() < now.getTime()) {
           calculatedStatus = "overdue";
         } else if (t.status === "overdue") {
@@ -248,9 +248,9 @@ app.post("/api/prioritize", async (req, res) => {
       let calculatedPriority = 30;
       let reason = "Standard fallback priority score applied.";
 
-      if (t.status === "done") {
+      if (t.status === "done" || t.status === "archived") {
         calculatedPriority = 5;
-        reason = "Task is already completed.";
+        reason = t.status === "done" ? "Task is already completed." : "Task is archived.";
       } else if (calculatedStatus === "overdue") {
         calculatedPriority = 95;
         reason = "Task is overdue; critical attention required.";
@@ -269,10 +269,10 @@ app.post("/api/prioritize", async (req, res) => {
       
       let scheduled_start: string | null = null;
       let scheduled_end: string | null = null;
-      let scheduling_reason = "No calendar slot assigned for completed tasks.";
+      let scheduling_reason = "No calendar slot assigned for completed/archived tasks.";
       let scheduling_warning = "";
 
-      if (calculatedStatus !== "done") {
+      if (calculatedStatus !== "done" && calculatedStatus !== "archived") {
         const slot = findOpenSlot(currentSearchStart, finalEffort);
         scheduled_start = slot.start.toISOString();
         scheduled_end = slot.end.toISOString();
@@ -381,7 +381,7 @@ Please perform the following optimizations for each task:
 1. COMPUTE PRIORITY SCORE:
    - Calculate a dynamic priority score (integer from 1 to 100) for every incomplete task.
    - Tasks due sooner relative to ${localNow} must get higher priority scores. Overdue is highest priority (90-100).
-   - "done" tasks must receive a very low priority score (1-10).
+   - "done" or "archived" tasks must receive a very low priority score (1-10).
    - Tasks connected to Goals should receive a moderate priority score boost.
    - Provide a concise, clear one-sentence "priority_reason" explaining exactly why the task received this rank (e.g. "moved up — deadline in 18 hours, 2 hours of work remaining").
 
@@ -390,13 +390,13 @@ Please perform the following optimizations for each task:
    - If "estimated_effort" is already > 0, preserve its value.
 
 3. DETECT OVERDUE:
-   - If the task is completed ("done"), keep it as "done".
-   - If the task's deadline has fully passed (is on or before ${localNow}) and is not "done", set status to "overdue".
+   - If the task is completed ("done") or "archived", keep its status as is.
+   - If the task's deadline has fully passed (is on or before ${localNow}) and is not "done" and not "archived", set status to "overdue".
    - Scheduled start/end times passing have NO impact on overdue classification.
    - Otherwise, preserve its current status.
 
 4. ALLOCATE CALENDAR SLOTS (SCHEDULING):
-   - For all incomplete tasks (status is not "done"), find an optimal open (non-conflicting) slot in the user's calendar this week.
+   - For all incomplete tasks (status is not "done" and not "archived"), find an optimal open (non-conflicting) slot in the user's calendar this week.
    - A valid slot must start after ${localNow} and end before the end of the current week (7 days from now).
    - IMPORTANT: Always prefer scheduling the slot as EARLY as possible (e.g., today) rather than later in the week, as long as it does not conflict with busy blocks.
    - The slot must be during daytime hours (between 08:00 and 20:00 local time).
@@ -594,7 +594,24 @@ For each extracted task, provide:
     return res.json({ tasks: returnedTasks });
   } catch (error) {
     console.error("Error extracting tasks with Gemini:", error);
-    return res.status(500).json({ error: "Failed to extract tasks" });
+    const lines = text.split("\n")
+      .map((l: any) => l.trim())
+      .filter((l: any) => l.length > 5 && !l.startsWith("#"));
+
+    const count = type === "goal" ? Math.min(Math.max(lines.length, 4), 6) : Math.min(lines.length, 6);
+    const fallbackTasks = [];
+    
+    for (let i = 0; i < (count || 4); i++) {
+      const title = lines[i] ? lines[i].replace(/^[-*\s\d.]+(\s*)/, "").substring(0, 60) : `Step ${i + 1} for ${text.substring(0, 30)}`;
+      const deadline = new Date(now.getTime() + (i + 1) * 24 * 60 * 60 * 1000).toISOString();
+      fallbackTasks.push({
+        title,
+        description: `Auto-generated checklist item ${i + 1} extracted from input context.`,
+        estimated_effort: 45,
+        deadline
+      });
+    }
+    return res.json({ tasks: fallbackTasks });
   }
 });
 

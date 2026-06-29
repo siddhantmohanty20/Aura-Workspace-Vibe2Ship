@@ -195,8 +195,9 @@ export async function deleteCalendarEvent(eventId: string): Promise<void> {
     },
   });
 
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`Google Calendar Event Deletion error: ${response.statusText}`);
+  if (!response.ok && response.status !== 404 && response.status !== 410) {
+    const errText = await response.text().catch(() => "");
+    throw new Error(`Google Calendar Event Deletion error: ${response.statusText} - ${errText}`);
   }
 }
 

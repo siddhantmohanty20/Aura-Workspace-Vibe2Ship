@@ -190,7 +190,7 @@ export async function saveTaskToFirestore(taskData: {
   deadline: string;
   estimated_effort: number;
   goal_id: string | null;
-  status?: "not_started" | "in_progress" | "done" | "overdue";
+  status?: "not_started" | "in_progress" | "done" | "overdue" | "archived";
   priority_score?: number;
   calendarEventId?: string | null;
   priority_reason?: string;
@@ -214,12 +214,12 @@ export async function saveTaskToFirestore(taskData: {
   const deadlineDate = new Date(taskData.deadline);
   
   // Decide initial status and completion timestamp
-  let determinedStatus: "not_started" | "in_progress" | "done" | "overdue" = taskData.status || "not_started";
+  let determinedStatus: "not_started" | "in_progress" | "done" | "overdue" | "archived" = taskData.status || "not_started";
   let completedAtVal: string | null = null;
 
   if (determinedStatus === "done") {
     completedAtVal = taskData.completed_at || now.toISOString();
-  } else if (deadlineDate.getTime() < now.getTime()) {
+  } else if (determinedStatus !== "archived" && deadlineDate.getTime() < now.getTime()) {
     determinedStatus = "overdue";
   }
 

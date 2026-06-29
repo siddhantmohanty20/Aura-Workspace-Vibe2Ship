@@ -25,8 +25,8 @@ Aura Workspace isn't just a UI wrapper around an LLM chat prompt. It features a 
 
 ### 🎯 Intelligent Prioritization & Scheduling
 *   **AI-Driven Queue**: Gemini evaluates your tasks based on effort, deadline, and context, organizing your day dynamically.
-*   **Calendar Auto-Scheduling**: The agent finds available time slots and automatically schedules blocks of work on your Google Calendar.
-*   **Proactive Re-planning**: Missed a deadline? The system automatically shifts your schedule and re-prioritizes to keep you afloat.
+*   **Calendar Auto-Scheduling**: The agent finds available time slots and automatically schedules blocks of work on your Google Calendar. It maintains strict bidirectional synchronization (deleting a task immediately removes it from your Calendar).
+*   **Proactive Re-planning & Delay Drafting**: Missed a deadline? The system automatically shifts your schedule and re-prioritizes to keep you afloat. It intelligently drafts customized Gmail apology/delay templates with your adjusted timeline. Deleting the overdue task or the draft automatically synchronizes the deletion across the system to maintain a clean workspace.
 
 ### 🧠 Smart Goal & Note Management
 *   **AI Goal Decomposition**: Enter a massive, vague milestone ("Launch marketing campaign"). Aura uses Gemini to break it down into actionable, sequential sub-tasks.
