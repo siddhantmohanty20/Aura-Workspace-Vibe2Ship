@@ -1,0 +1,7 @@
+This folder is intended for screenshots used in the README.md file.
+
+Expected files:
+- queue.png
+- goals.png
+- notes.png
+- habits.png

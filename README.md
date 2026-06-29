@@ -71,11 +71,11 @@ The system operates on a Full-Stack architecture with a React client and an Expr
 
 | Workspace Queue & Agent Reasoning | AI Goal Decomposition |
 | :---: | :---: |
-| ![Workspace Queue](placeholder-queue.png)<br>_The dynamic task queue with the transparent Agent Reasoning log._ | ![Goal Decomposition](placeholder-goals.png)<br>_Breaking down a high-level goal into actionable, scheduled subtasks._ |
+| ![Workspace Queue](./screenshots/queue.png)<br>_The dynamic task queue with the transparent Agent Reasoning log._ | ![Goal Decomposition](./screenshots/goals.png)<br>_Breaking down a high-level goal into actionable, scheduled subtasks._ |
 
 | Notes Extraction | Habit Tracking & Analytics |
 | :---: | :---: |
-| ![Notes Scratchpad](placeholder-notes.png)<br>_Unstructured notes automatically parsed into tracked tasks._ | ![Habit Dashboard](placeholder-habits.png)<br>_Visualizing streaks and tracking productivity momentum._ |
+| ![Notes Scratchpad](./screenshots/notes.png)<br>_Unstructured notes automatically parsed into tracked tasks._ | ![Habit Dashboard](./screenshots/habits.png)<br>_Visualizing streaks and tracking productivity momentum._ |
 
 ---
 
